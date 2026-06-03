@@ -33,17 +33,3 @@ go-imports:
 go-test:
 	go test ./...
 
-.PHONY: ui-lint
-ui-lint: npm-install npm-lint npm-fmt
-
-.PHONY: npm-install
-npm-install:
-	cd $(UI_PATH) && npm ci
-
-.PHONY: npm-lint
-npm-lint:
-	cd $(UI_PATH) && npm run lint
-
-.PHONY: npm-fmt
-npm-fmt:
-	cd $(UI_PATH) && npm run fmt

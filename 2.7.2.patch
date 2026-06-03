@@ -1,0 +1,102 @@
+diff --git a/Makefile b/Makefile
+index ad78cb4..c4536a9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -33,17 +33,3 @@ go-imports:
+ go-test:
+ 	go test ./...
+ 
+-.PHONY: ui-lint
+-ui-lint: npm-install npm-lint npm-fmt
+-
+-.PHONY: npm-install
+-npm-install:
+-	cd $(UI_PATH) && npm ci
+-
+-.PHONY: npm-lint
+-npm-lint:
+-	cd $(UI_PATH) && npm run lint
+-
+-.PHONY: npm-fmt
+-npm-fmt:
+-	cd $(UI_PATH) && npm run fmt
+diff --git a/rbac/rbac_test.go b/rbac/rbac_test.go
+index 545b693..ca8a2d9 100644
+--- a/rbac/rbac_test.go
++++ b/rbac/rbac_test.go
+@@ -43,3 +43,10 @@ func TestPermissions(t *testing.T) {
+ 	assert.False(t, p.allows(Actions.Project("foo").Node("foo").View()))
+ 	assert.False(t, p.allows(Actions.Project("bar").Node("bar").View()))
+ }
++
++func TestProjectLogsPermissions(t *testing.T) {
++	p := NewPermission(ScopeProjectLogs, ActionView, Object{"project_id": "foo"})
++	assert.True(t, p.allows(Actions.Project("foo").Logs().View()))
++	assert.False(t, p.allows(Actions.Project("bar").Logs().View()))
++	assert.False(t, p.allows(Actions.Project("foo").Traces().View()))
++}
+diff --git a/watchers/deployments_test.go b/watchers/deployments_test.go
+index 63ce0e3..247ebc2 100644
+--- a/watchers/deployments_test.go
++++ b/watchers/deployments_test.go
+@@ -7,6 +7,7 @@ import (
+ 
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
++	"github.com/coroot/coroot/utils"
+ 	"github.com/stretchr/testify/assert"
+ )
+ 
+@@ -93,3 +94,52 @@ func TestCalcDeployments(t *testing.T) {
+ 	addInstance("i2", "rs2", 0, 0, 1, 1, 0, 0)
+ 	checkDeployments("3-0:rs2;5-5:rs1")
+ }
++
++func TestCalcMetricsSnapshotTracksMemoryGrowthWithoutBreakingLogClusters(t *testing.T) {
++	const mb = float32(1024 * 1024)
++
++	from := timeseries.Time(0)
++	step := 5 * timeseries.Minute
++	points := 13
++	to := from.Add(step * timeseries.Duration(points-1))
++
++	app := model.NewApplication(model.NewApplicationId("cluster-a", "default", model.ApplicationKindDeployment, "checkout"))
++	instance := app.GetOrCreateInstance("checkout-0", nil)
++	container := model.NewContainer("/k8s/default/checkout-0/app", "app")
++
++	rss := make([]float32, points)
++	memoryLimit := make([]float32, points)
++	zeroes := make([]float32, points)
++	for i := range rss {
++		rss[i] = (400 + float32(i)*16) * mb
++		memoryLimit[i] = 1024 * mb
++	}
++	container.MemoryRss = timeseries.NewWithData(from, step, rss)
++	container.MemoryLimit = timeseries.NewWithData(from, step, memoryLimit)
++	container.CpuUsage = timeseries.NewWithData(from, step, zeroes)
++	container.Restarts = timeseries.NewWithData(from, step, zeroes)
++	container.OOMKills = timeseries.NewWithData(from, step, zeroes)
++	instance.Containers[container.Id] = container
++
++	app.LogMessages[model.SeverityError] = &model.LogMessages{
++		Messages: timeseries.NewWithData(from, step, []float32{1, 0, 2, 0, 1, 0, 1, 0, 2, 0, 1, 0, 1}),
++		Patterns: map[string]*model.LogPattern{
++			"primary": {SimilarPatternHashes: utils.NewStringSet("primary", "secondary")},
++			"secondary": {SimilarPatternHashes: utils.NewStringSet("primary", "secondary")},
++		},
++	}
++	app.LogMessages[model.SeverityWarning] = &model.LogMessages{
++		Messages: timeseries.NewWithData(from, step, []float32{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0}),
++		Patterns: map[string]*model.LogPattern{},
++	}
++
++	assert.ElementsMatch(t, []string{"primary", "secondary"}, app.SimilarLogPatternHashes("primary"))
++
++	snapshot := calcMetricsSnapshot(app, from, to, step)
++
++	assert.NotNil(t, snapshot)
++	assert.Greater(t, snapshot.MemoryLeakPercent, float32(40))
++	assert.EqualValues(t, 9, snapshot.LogErrors)
++	assert.EqualValues(t, 6, snapshot.LogWarnings)
++	assert.ElementsMatch(t, []string{"primary", "secondary"}, app.SimilarLogPatternHashes("primary"))
++}

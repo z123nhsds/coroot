@@ -43,3 +43,10 @@ func TestPermissions(t *testing.T) {
 	assert.False(t, p.allows(Actions.Project("foo").Node("foo").View()))
 	assert.False(t, p.allows(Actions.Project("bar").Node("bar").View()))
 }
+
+func TestProjectLogsPermissions(t *testing.T) {
+	p := NewPermission(ScopeProjectLogs, ActionView, Object{"project_id": "foo"})
+	assert.True(t, p.allows(Actions.Project("foo").Logs().View()))
+	assert.False(t, p.allows(Actions.Project("bar").Logs().View()))
+	assert.False(t, p.allows(Actions.Project("foo").Traces().View()))
+}
