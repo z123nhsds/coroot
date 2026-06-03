@@ -1,0 +1,177 @@
+diff --git a/auditor/auditor.go b/auditor/auditor.go
+index 196b059..e2d5f39 100644
+--- a/auditor/auditor.go
++++ b/auditor/auditor.go
+@@ -67,6 +67,7 @@ func Audit(w *model.World, p *db.Project, generateDetailedReportFor *model.Appli
+ 		stages.stage("nodejs", a.nodejs)
+ 		stages.stage("logs", a.logs)
+ 		stages.stage("deployments", a.deployments)
++		stages.stage("memory_isolation", a.memoryIsolation)
+ 
+ 		for _, r := range a.reports {
+ 			widgets := a.enrichWidgets(r.Widgets, app.Events)
+diff --git a/db/db.go b/db/db.go
+index 4939a6e..8ed2075 100644
+--- a/db/db.go
++++ b/db/db.go
+@@ -121,6 +121,7 @@ func (db *DB) Migrate(extraTables ...Table) error {
+ 		&User{},
+ 		&AlertingRule{},
+ 		&Alert{},
++		&MemoryIsolationRecord{},
+ 	}
+ 	return db.Migrator().Migrate(append(defaultTables, extraTables...)...)
+ }
+diff --git a/model/check.go b/model/check.go
+index a90c881..f450ce4 100644
+--- a/model/check.go
++++ b/model/check.go
+@@ -70,6 +70,7 @@ var Checks = struct {
+ 	MemoryOOM                  CheckConfig
+ 	MemoryLeakPercent          CheckConfig
+ 	MemoryPressure             CheckConfig
++	MemoryIsolation            CheckConfig
+ 	StorageSpace               CheckConfig
+ 	StorageIOLoad              CheckConfig
+ 	NetworkRTT                 CheckConfig
+@@ -166,6 +167,15 @@ var Checks = struct {
+ 		MessageTemplate:         `high memory stall time on {{.Items "instances"}}`,
+ 		ConditionFormatTemplate: "memory stall time > <threshold> per second",
+ 	},
++	MemoryIsolation: CheckConfig{
++		Category:                AuditReportMemory,
++		Type:                    CheckTypeValueBased,
++		Title:                   "Memory isolation",
++		DefaultThreshold:        50,
++		Unit:                    CheckUnitPercent,
++		MessageTemplate:         `memory growth exceeds {{.ThresholdPercent}} of previous version, service auto-isolated`,
++		ConditionFormatTemplate: "memory growth percentage exceeds <threshold> of previous version",
++	},
+ 	StorageIOLoad: CheckConfig{
+ 		Category:                AuditReportStorage,
+ 		Type:                    CheckTypeItemBased,
+diff --git a/model/world.go b/model/world.go
+index b5ffdcc..4cc4da3 100644
+--- a/model/world.go
++++ b/model/world.go
+@@ -30,6 +30,8 @@ type World struct {
+ 	IntegrationStatus IntegrationStatus
+ 
+ 	ProjectNamesById map[string]string
++	
++	Db interface{}
+ }
+ 
+ func NewWorld(from, to timeseries.Time, step, rawStep timeseries.Duration) *World {
+diff --git a/rbac/action.go b/rbac/action.go
+index 3d98f72..e5996af 100644
+--- a/rbac/action.go
++++ b/rbac/action.go
+@@ -33,6 +33,7 @@ const (
+ 	ScopeDashboard                    Scope = "project.dashboard"
+ 	ScopeProjectAlertingRules         Scope = "project.alerting_rules"
+ 	ScopeProjectAlerts                Scope = "project.alerts"
++	ScopeProjectMemoryIsolation       Scope = "project.memory_isolation"
+ )
+ 
+ type Action struct {
+diff --git a/rbac/actions.go b/rbac/actions.go
+index 153b192..243f536 100644
+--- a/rbac/actions.go
++++ b/rbac/actions.go
+@@ -84,6 +84,8 @@ func (as ProjectActionSet) List() []Action {
+ 		as.AlertingRules().Edit(),
+ 		as.Alerts().View(),
+ 		as.Alerts().Edit(),
++		as.MemoryIsolation().View(),
++		as.MemoryIsolation().Edit(),
+ 	}
+ }
+ 
+@@ -163,6 +165,10 @@ func (as ProjectActionSet) Alerts() ProjectAction {
+ 	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
+ }
+ 
++func (as ProjectActionSet) MemoryIsolation() ProjectAction {
++	return ProjectAction{project: &as, scope: ScopeProjectMemoryIsolation}
++}
++
+ type ProjectViewAction struct {
+ 	project *ProjectActionSet
+ 	scope   Scope
+diff --git a/rbac/role.go b/rbac/role.go
+index c78f404..3008063 100644
+--- a/rbac/role.go
++++ b/rbac/role.go
+@@ -5,9 +5,10 @@ import (
+ )
+ 
+ const (
+-	RoleAdmin  RoleName = "Admin"
+-	RoleEditor RoleName = "Editor"
+-	RoleViewer RoleName = "Viewer"
++	RoleAdmin           RoleName = "Admin"
++	RoleEditor          RoleName = "Editor"
++	RoleViewer          RoleName = "Viewer"
++	RoleIsolationOperator RoleName = "IsolationOperator"
+ )
+ 
+ var (
+@@ -25,10 +26,17 @@ var (
+ 			NewPermission(ScopeDashboards, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
++			NewPermission(ScopeProjectMemoryIsolation, ActionView, nil),
++			NewPermission(ScopeProjectMemoryIsolation, ActionEdit, nil),
+ 		),
+ 		NewRole(RoleViewer,
+ 			NewPermission(ScopeAll, ActionView, nil),
+ 		),
++		NewRole(RoleIsolationOperator,
++			NewPermission(ScopeAll, ActionView, nil),
++			NewPermission(ScopeProjectMemoryIsolation, ActionView, nil),
++			NewPermission(ScopeProjectMemoryIsolation, ActionEdit, nil),
++		),
+ 	}
+ )
+ 
+diff --git a/stats/stats.go b/stats/stats.go
+index c6515f2..c119d7d 100644
+--- a/stats/stats.go
++++ b/stats/stats.go
+@@ -85,6 +85,11 @@ type Stats struct {
+ 		McpCalls          map[string]int             `json:"mcp_calls"`
+ 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
+ 	} `json:"ux"`
++	MemoryIsolation struct {
++		TotalIsolations   int `json:"total_isolations"`
++		ActiveIsolations  int `json:"active_isolations"`
++		ResolvedIsolations int `json:"resolved_isolations"`
++	} `json:"memory_isolation"`
+ 	Performance struct {
+ 		Constructor constructor.Profile `json:"constructor"`
+ 		Auditor     auditor.Profile     `json:"auditor"`
+@@ -527,6 +532,23 @@ func (c *Collector) collect() Stats {
+ 
+ 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
+ 
++	// 收集内存隔离统计
++	for _, p := range projects {
++		isolations, err := c.db.GetMemoryIsolationRecords(p.Id)
++		if err != nil {
++			klog.Errorln("failed to get memory isolation records:", err)
++			continue
++		}
++		stats.MemoryIsolation.TotalIsolations += len(isolations)
++		for _, iso := range isolations {
++			if iso.ResolvedAt == 0 {
++				stats.MemoryIsolation.ActiveIsolations++
++			} else {
++				stats.MemoryIsolation.ResolvedIsolations++
++			}
++		}
++	}
++
+ 	return stats
+ }
+ 

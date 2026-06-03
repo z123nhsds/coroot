@@ -70,6 +70,7 @@ var Checks = struct {
 	MemoryOOM                  CheckConfig
 	MemoryLeakPercent          CheckConfig
 	MemoryPressure             CheckConfig
+	MemoryIsolation            CheckConfig
 	StorageSpace               CheckConfig
 	StorageIOLoad              CheckConfig
 	NetworkRTT                 CheckConfig
@@ -165,6 +166,15 @@ var Checks = struct {
 		Unit:                    CheckUnitSecond,
 		MessageTemplate:         `high memory stall time on {{.Items "instances"}}`,
 		ConditionFormatTemplate: "memory stall time > <threshold> per second",
+	},
+	MemoryIsolation: CheckConfig{
+		Category:                AuditReportMemory,
+		Type:                    CheckTypeValueBased,
+		Title:                   "Memory isolation",
+		DefaultThreshold:        50,
+		Unit:                    CheckUnitPercent,
+		MessageTemplate:         `memory growth exceeds {{.ThresholdPercent}} of previous version, service auto-isolated`,
+		ConditionFormatTemplate: "memory growth percentage exceeds <threshold> of previous version",
 	},
 	StorageIOLoad: CheckConfig{
 		Category:                AuditReportStorage,

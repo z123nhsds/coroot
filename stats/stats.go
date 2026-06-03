@@ -85,6 +85,11 @@ type Stats struct {
 		McpCalls          map[string]int             `json:"mcp_calls"`
 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
 	} `json:"ux"`
+	MemoryIsolation struct {
+		TotalIsolations   int `json:"total_isolations"`
+		ActiveIsolations  int `json:"active_isolations"`
+		ResolvedIsolations int `json:"resolved_isolations"`
+	} `json:"memory_isolation"`
 	Performance struct {
 		Constructor constructor.Profile `json:"constructor"`
 		Auditor     auditor.Profile     `json:"auditor"`
@@ -526,6 +531,23 @@ func (c *Collector) collect() Stats {
 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
 
 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
+
+	// 收集内存隔离统计
+	for _, p := range projects {
+		isolations, err := c.db.GetMemoryIsolationRecords(p.Id)
+		if err != nil {
+			klog.Errorln("failed to get memory isolation records:", err)
+			continue
+		}
+		stats.MemoryIsolation.TotalIsolations += len(isolations)
+		for _, iso := range isolations {
+			if iso.ResolvedAt == 0 {
+				stats.MemoryIsolation.ActiveIsolations++
+			} else {
+				stats.MemoryIsolation.ResolvedIsolations++
+			}
+		}
+	}
 
 	return stats
 }

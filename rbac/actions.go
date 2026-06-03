@@ -84,6 +84,8 @@ func (as ProjectActionSet) List() []Action {
 		as.AlertingRules().Edit(),
 		as.Alerts().View(),
 		as.Alerts().Edit(),
+		as.MemoryIsolation().View(),
+		as.MemoryIsolation().Edit(),
 	}
 }
 
@@ -161,6 +163,10 @@ func (as ProjectActionSet) AlertingRules() ProjectAction {
 
 func (as ProjectActionSet) Alerts() ProjectAction {
 	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
+}
+
+func (as ProjectActionSet) MemoryIsolation() ProjectAction {
+	return ProjectAction{project: &as, scope: ScopeProjectMemoryIsolation}
 }
 
 type ProjectViewAction struct {

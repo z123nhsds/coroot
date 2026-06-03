@@ -30,6 +30,8 @@ type World struct {
 	IntegrationStatus IntegrationStatus
 
 	ProjectNamesById map[string]string
+	
+	Db interface{}
 }
 
 func NewWorld(from, to timeseries.Time, step, rawStep timeseries.Duration) *World {

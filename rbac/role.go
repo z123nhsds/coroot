@@ -5,9 +5,10 @@ import (
 )
 
 const (
-	RoleAdmin  RoleName = "Admin"
-	RoleEditor RoleName = "Editor"
-	RoleViewer RoleName = "Viewer"
+	RoleAdmin           RoleName = "Admin"
+	RoleEditor          RoleName = "Editor"
+	RoleViewer          RoleName = "Viewer"
+	RoleIsolationOperator RoleName = "IsolationOperator"
 )
 
 var (
@@ -25,9 +26,16 @@ var (
 			NewPermission(ScopeDashboards, ActionEdit, nil),
 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
+			NewPermission(ScopeProjectMemoryIsolation, ActionView, nil),
+			NewPermission(ScopeProjectMemoryIsolation, ActionEdit, nil),
 		),
 		NewRole(RoleViewer,
 			NewPermission(ScopeAll, ActionView, nil),
+		),
+		NewRole(RoleIsolationOperator,
+			NewPermission(ScopeAll, ActionView, nil),
+			NewPermission(ScopeProjectMemoryIsolation, ActionView, nil),
+			NewPermission(ScopeProjectMemoryIsolation, ActionEdit, nil),
 		),
 	}
 )
