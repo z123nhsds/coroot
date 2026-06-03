@@ -33,6 +33,22 @@ go-imports:
 go-test:
 	go test ./...
 
+.PHONY: regression-test
+regression-test:
+	go test -v ./regression -run TestAllRegressionTests
+
+.PHONY: regression-test-rca-slo
+regression-test-rca-slo:
+	go test -v ./regression -run TestRCASLOIntegration
+
+.PHONY: regression-test-mcp-log-memory
+regression-test-mcp-log-memory:
+	go test -v ./regression -run TestMCPLogMemoryIntegration
+
+.PHONY: regression-test-utils-watchers
+regression-test-utils-watchers:
+	go test -v ./regression -run TestUtilsWatchersIntegration
+
 .PHONY: ui-lint
 ui-lint: npm-install npm-lint npm-fmt
 
