@@ -112,7 +112,7 @@ func (n *AlertNotifier) sendAlerts() {
 			cancel()
 		}
 		if sendErr != nil {
-			klog.Errorf("failed to send alert to %s: %s", notification.Destination.IntegrationType, sendErr)
+			klog.Errorf("failed to send alert to %s: %v", notification.Destination.IntegrationType, sendErr)
 			failedDestinations[dKey] = true
 		} else {
 			notification.SentAt = timeseries.Now()

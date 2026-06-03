@@ -16,7 +16,7 @@ func WriteJson(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(v); err != nil {
-		klog.Errorf("failed to encode: %s", err)
+		klog.Errorf("failed to encode: %v", err)
 		http.Error(w, "failed to encode", http.StatusInternalServerError)
 		return
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coroot/coroot/auditor"
+	"github.com/coroot/coroot/auditor"
 	cloud_pricing "github.com/coroot/coroot/cloud-pricing"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
@@ -319,7 +320,7 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step 
 			cpuUsage.Add(c.CpuUsage)
 			memUsage.Add(c.MemoryRss)
 			restarts.Add(c.Restarts)
-			oomKills.Add(c.OOMKills)
+			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
 			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
 				ms.MemoryLeakPercent = pct
 			}

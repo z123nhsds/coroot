@@ -48,14 +48,14 @@ func ParseTime(now timeseries.Time, val string, def timeseries.Time) timeseries.
 		}
 		d, err := str2duration.ParseDuration(val[3:])
 		if err != nil {
-			klog.Warningf("invalid %s: %s", val, err)
+			klog.Warningf("invalid %s: %v", val, err)
 			return def
 		}
 		return now.Add(timeseries.Duration(d.Seconds()))
 	}
 	ms, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
-		klog.Warningf("invalid %s: %s", val, err)
+		klog.Warningf("invalid %s: %v", val, err)
 		return def
 	}
 	if ms == 0 {

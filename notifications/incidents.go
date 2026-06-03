@@ -105,7 +105,7 @@ func (n *IncidentNotifier) sendIncidents() {
 			cancel()
 		}
 		if sendErr != nil {
-			klog.Errorf("failed to send to %s: %s", notification.Destination.IntegrationType, sendErr)
+			klog.Errorf("failed to send to %s: %v", notification.Destination.IntegrationType, sendErr)
 			failedDestinations[dKey] = true
 		} else {
 			notification.SentAt = timeseries.Now()
