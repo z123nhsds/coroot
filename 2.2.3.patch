@@ -1,0 +1,310 @@
+diff --git a/api/auth.go b/api/auth.go
+index 025590c..4644382 100644
+--- a/api/auth.go
++++ b/api/auth.go
+@@ -42,7 +42,7 @@ func (api *Api) AuthInit(anonymousRole string, adminPassword string) error {
+ 			for _, r := range roles {
+ 				names = append(names, r.Name)
+ 			}
+-			return fmt.Errorf("anonymous role must one of %s, got '%s'", names, role)
++			return fmt.Errorf("anonymous role must one of %v, got '%s'", names, role)
+ 		}
+ 		api.authAnonymousRole = role
+ 		klog.Infoln("anonymous access enabled with the role:", role)
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..144035f 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -3,7 +3,7 @@ package auditor
+ import (
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+-	"gonum.org/v1/gonum/stat"
++	"github.com/coroot/coroot/utils"
+ )
+ 
+ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+@@ -129,7 +129,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 		for container, byInstance := range rssByContainer {
+ 			limit := limitByContainer[container].Get().Reduce(timeseries.Max)
+ 			for _, rss := range byInstance {
+-				if pct := MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
++				if pct := utils.MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
+ 					maxPct = pct
+ 				}
+ 			}
+@@ -155,71 +155,3 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 		return
+ 	}
+ }
+-
+-func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+-	if rss.IsEmpty() {
+-		return 0
+-	}
+-	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
+-		return 0
+-	}
+-	var x, y []float64
+-	var cx, cy []float64
+-	var prev = timeseries.NaN
+-	iter := rss.Iter()
+-	for iter.Next() {
+-		t, v := iter.Value()
+-		if timeseries.IsNaN(v) {
+-			continue
+-		}
+-		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
+-			if len(cx) > len(x) {
+-				x, y = cx, cy
+-			}
+-			cx, cy = nil, nil
+-		}
+-		cx = append(cx, float64(t))
+-		cy = append(cy, float64(v))
+-		prev = v
+-	}
+-	if len(cx) > len(x) {
+-		x, y = cx, cy
+-	}
+-	if len(x) < 10 || len(x) < rss.Len()/3 {
+-		return 0
+-	}
+-
+-	alpha, beta := stat.LinearRegression(x, y, nil, false)
+-	if beta <= 0 {
+-		return 0
+-	}
+-
+-	tailStart := len(x) - len(x)/4
+-	for tailStart > 0 && x[len(x)-1]-x[tailStart] < float64(15*timeseries.Minute) {
+-		tailStart--
+-	}
+-	if len(x)-tailStart < 5 {
+-		return 0
+-	}
+-	_, tailBeta := stat.LinearRegression(x[tailStart:], y[tailStart:], nil, false)
+-	if tailBeta <= 0 || tailBeta < beta*0.3 {
+-		return 0
+-	}
+-
+-	s := float32(alpha + beta*float64(to.Add(-timeseries.Hour)))
+-	e := float32(alpha + beta*float64(to))
+-	if !(e > 0 && e > s) {
+-		return 0
+-	}
+-	var minGrowth float32 = 50 * 1024 * 1024
+-	if !timeseries.IsNaN(limit) && limit > 0 {
+-		minGrowth = limit * 0.05
+-	}
+-	if (e - s) < minGrowth {
+-		return 0
+-	}
+-	if s > 0 {
+-		return (e - s) / s * 100
+-	}
+-	return (e - s) / e * 100
+-}
+diff --git a/notifications/alerts.go b/notifications/alerts.go
+index e37ae50..2bb9136 100644
+--- a/notifications/alerts.go
++++ b/notifications/alerts.go
+@@ -112,7 +112,7 @@ func (n *AlertNotifier) sendAlerts() {
+ 			cancel()
+ 		}
+ 		if sendErr != nil {
+-			klog.Errorf("failed to send alert to %s: %s", notification.Destination.IntegrationType, sendErr)
++			klog.Errorf("failed to send alert to %s: %v", notification.Destination.IntegrationType, sendErr)
+ 			failedDestinations[dKey] = true
+ 		} else {
+ 			notification.SentAt = timeseries.Now()
+diff --git a/notifications/incidents.go b/notifications/incidents.go
+index 1db3e88..8a34d0c 100644
+--- a/notifications/incidents.go
++++ b/notifications/incidents.go
+@@ -105,7 +105,7 @@ func (n *IncidentNotifier) sendIncidents() {
+ 			cancel()
+ 		}
+ 		if sendErr != nil {
+-			klog.Errorf("failed to send to %s: %s", notification.Destination.IntegrationType, sendErr)
++			klog.Errorf("failed to send to %s: %v", notification.Destination.IntegrationType, sendErr)
+ 			failedDestinations[dKey] = true
+ 		} else {
+ 			notification.SentAt = timeseries.Now()
+diff --git a/notifications/opsgenie.go b/notifications/opsgenie.go
+index 84b09e7..e6f9a38 100644
+--- a/notifications/opsgenie.go
++++ b/notifications/opsgenie.go
+@@ -2,6 +2,7 @@ package notifications
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"strings"
+@@ -114,5 +115,5 @@ func (og *Opsgenie) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNo
+ }
+ 
+ func (og *Opsgenie) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+-	return fmt.Errorf("not supported")
++	return errors.New("not supported")
+ }
+diff --git a/notifications/pagerduty.go b/notifications/pagerduty.go
+index 2127cf5..5645baf 100644
+--- a/notifications/pagerduty.go
++++ b/notifications/pagerduty.go
+@@ -2,6 +2,7 @@ package notifications
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"strings"
+ 
+@@ -95,5 +96,5 @@ func (pd *Pagerduty) SendAlert(ctx context.Context, baseUrl string, n *db.AlertN
+ }
+ 
+ func (pd *Pagerduty) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+-	return fmt.Errorf("not supported")
++	return errors.New("not supported")
+ }
+diff --git a/notifications/webhook.go b/notifications/webhook.go
+index 0fe5d99..2b6c4f5 100644
+--- a/notifications/webhook.go
++++ b/notifications/webhook.go
+@@ -106,7 +106,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
+ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+ 	tmpl, err := template.New("incidentTemplate").Funcs(templateFunctions).Parse(wh.cfg.IncidentTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid incident template: %s", err)
++		return fmt.Errorf("invalid incident template: %w", err)
+ 	}
+ 
+ 	var data bytes.Buffer
+@@ -134,7 +134,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	}
+ 	tmpl, err := template.New("alertTemplate").Funcs(templateFunctions).Parse(wh.cfg.AlertTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid alert template: %s", err)
++		return fmt.Errorf("invalid alert template: %w", err)
+ 	}
+ 
+ 	var data bytes.Buffer
+@@ -154,7 +154,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	}
+ 	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid alert template: %s", err)
++		return fmt.Errorf("invalid alert template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+@@ -163,7 +163,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+ 	tmpl, err := template.New("deploymentTemplate").Funcs(templateFunctions).Parse(wh.cfg.DeploymentTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid deployment template: %s", err)
++		return fmt.Errorf("invalid deployment template: %w", err)
+ 	}
+ 
+ 	status := "Deployed"
+@@ -193,7 +193,7 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
+ 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
+ 	}, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid deployment template: %s", err)
++		return fmt.Errorf("invalid deployment template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+diff --git a/prom/clickhouse.go b/prom/clickhouse.go
+index 394eb3f..b780b20 100644
+--- a/prom/clickhouse.go
++++ b/prom/clickhouse.go
+@@ -212,7 +212,7 @@ func (c *ClickHouse) LabelValues(r *http.Request, w http.ResponseWriter, labelNa
+ 
+ 	matcherSets, err := parser.ParseMetricSelectors(r.Form["match[]"])
+ 	if err != nil {
+-		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %s", r.Form["match[]"]), errorBadData, nil)
++		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %v", r.Form["match[]"]), errorBadData, nil)
+ 		return
+ 	}
+ 	q, _ := c.Querier(timestamp.FromTime(now.Add(-time.Hour)), timestamp.FromTime(now))
+@@ -268,7 +268,7 @@ func (c *ClickHouse) Series(r *http.Request, w http.ResponseWriter) {
+ 	}
+ 	matcherSets, err := parser.ParseMetricSelectors(r.Form["match[]"])
+ 	if err != nil {
+-		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %s", r.Form["match[]"]), errorBadData, nil)
++		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %v", r.Form["match[]"]), errorBadData, nil)
+ 		return
+ 	}
+ 	q, _ := c.Querier(timestamp.FromTime(now.Add(-time.Hour)), timestamp.FromTime(now))
+diff --git a/prom/clickhouse_querier.go b/prom/clickhouse_querier.go
+index 9bd7c39..de4fba5 100644
+--- a/prom/clickhouse_querier.go
++++ b/prom/clickhouse_querier.go
+@@ -2,6 +2,7 @@ package prom
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"sort"
+ 	"strings"
+@@ -131,7 +132,7 @@ func (q *clickhouseQuerier) LabelValues(ctx context.Context, name string, _ *sto
+ }
+ 
+ func (q *clickhouseQuerier) LabelNames(ctx context.Context, _ *storage.LabelHints, _ ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+-	return nil, nil, fmt.Errorf("not yet implemented")
++	return nil, nil, errors.New("not yet implemented")
+ }
+ 
+ func (q *clickhouseQuerier) Close() error {
+diff --git a/prom/client.go b/prom/client.go
+index 4dda28e..550cadb 100644
+--- a/prom/client.go
++++ b/prom/client.go
+@@ -107,7 +107,7 @@ func newHttpClient(config httpClientConfig) (Client, error) {
+ 		},
+ 	}
+ 	if config.Url == "" {
+-		return nil, fmt.Errorf("prometheus is not configured")
++		return nil, errors.New("prometheus is not configured")
+ 	}
+ 	return c, nil
+ }
+diff --git a/utils/json.go b/utils/json.go
+index c768648..9d79b86 100644
+--- a/utils/json.go
++++ b/utils/json.go
+@@ -16,7 +16,7 @@ func WriteJson(w http.ResponseWriter, v any) {
+ 	w.Header().Set("Content-Type", "application/json")
+ 	enc := json.NewEncoder(w)
+ 	if err := enc.Encode(v); err != nil {
+-		klog.Errorf("failed to encode: %s", err)
++		klog.Errorf("failed to encode: %v", err)
+ 		http.Error(w, "failed to encode", http.StatusInternalServerError)
+ 		return
+ 	}
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..0aef53a 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -7,7 +7,6 @@ import (
+ 	"sort"
+ 	"time"
+ 
+-	"github.com/coroot/coroot/auditor"
+ 	cloud_pricing "github.com/coroot/coroot/cloud-pricing"
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+@@ -320,7 +319,7 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step
+ 			memUsage.Add(c.MemoryRss)
+ 			restarts.Add(c.Restarts)
+ 			oomKills.Add(c.OOMKills)
+-			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
++			if pct := utils.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
+ 				ms.MemoryLeakPercent = pct
+ 			}
+ 		}

@@ -107,7 +107,7 @@ func newHttpClient(config httpClientConfig) (Client, error) {
 		},
 	}
 	if config.Url == "" {
-		return nil, fmt.Errorf("prometheus is not configured")
+		return nil, errors.New("prometheus is not configured")
 	}
 	return c, nil
 }

@@ -42,7 +42,7 @@ func (api *Api) AuthInit(anonymousRole string, adminPassword string) error {
 			for _, r := range roles {
 				names = append(names, r.Name)
 			}
-			return fmt.Errorf("anonymous role must one of %s, got '%s'", names, role)
+			return fmt.Errorf("anonymous role must one of %v, got '%s'", names, role)
 		}
 		api.authAnonymousRole = role
 		klog.Infoln("anonymous access enabled with the role:", role)

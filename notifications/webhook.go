@@ -106,7 +106,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
 func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
 	tmpl, err := template.New("incidentTemplate").Funcs(templateFunctions).Parse(wh.cfg.IncidentTemplate)
 	if err != nil {
-		return fmt.Errorf("invalid incident template: %s", err)
+		return fmt.Errorf("invalid incident template: %w", err)
 	}
 
 	var data bytes.Buffer
@@ -134,7 +134,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 	}
 	tmpl, err := template.New("alertTemplate").Funcs(templateFunctions).Parse(wh.cfg.AlertTemplate)
 	if err != nil {
-		return fmt.Errorf("invalid alert template: %s", err)
+		return fmt.Errorf("invalid alert template: %w", err)
 	}
 
 	var data bytes.Buffer
@@ -154,7 +154,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 	}
 	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
 	if err != nil {
-		return fmt.Errorf("invalid alert template: %s", err)
+		return fmt.Errorf("invalid alert template: %w", err)
 	}
 
 	return wh.send(ctx, data.Bytes())
@@ -163,7 +163,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
 	tmpl, err := template.New("deploymentTemplate").Funcs(templateFunctions).Parse(wh.cfg.DeploymentTemplate)
 	if err != nil {
-		return fmt.Errorf("invalid deployment template: %s", err)
+		return fmt.Errorf("invalid deployment template: %w", err)
 	}
 
 	status := "Deployed"
@@ -193,7 +193,7 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
 	}, wh.cfg.CustomFields))
 	if err != nil {
-		return fmt.Errorf("invalid deployment template: %s", err)
+		return fmt.Errorf("invalid deployment template: %w", err)
 	}
 
 	return wh.send(ctx, data.Bytes())

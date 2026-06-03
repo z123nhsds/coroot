@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -114,5 +115,5 @@ func (og *Opsgenie) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNo
 }
 
 func (og *Opsgenie) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
-	return fmt.Errorf("not supported")
+	return errors.New("not supported")
 }
