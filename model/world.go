@@ -30,8 +30,6 @@ type World struct {
 	IntegrationStatus IntegrationStatus
 
 	ProjectNamesById map[string]string
-}
-
 func NewWorld(from, to timeseries.Time, step, rawStep timeseries.Duration) *World {
 	return &World{
 		Ctx:              timeseries.Context{From: from, To: to, Step: step, RawStep: rawStep},

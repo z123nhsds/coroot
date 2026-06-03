@@ -12,6 +12,7 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/constructor"
 	"github.com/coroot/coroot/db"
+	"github.com/coroot/coroot/notifications"
 	"github.com/coroot/coroot/timeseries"
 	"golang.org/x/exp/maps"
 	"k8s.io/klog"
@@ -19,13 +20,22 @@ import (
 
 func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, checkDeployments bool, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus, spaceManagerCfg config.ClickHouseSpaceManager, logPatternEvaluator LogPatternEvaluator, kubernetesEventEvaluator KubernetesEventEvaluator) {
 	var deployments *Deployments
+	var isolations *Isolations
 	if checkDeployments {
 		deployments = NewDeployments(database, pricing)
 	}
+	
+	var incidentNotifier *notifications.IncidentNotifier
+	if incidents != nil {
+		incidentNotifier = incidents.notifier
+	} else {
+		incidentNotifier = notifications.NewIncidentNotifier(database)
+	}
+	isolations = NewIsolations(database, incidentNotifier)
 
 	alerts := NewAlerts(database, globalPrometheus, globalClickHouse, logPatternEvaluator, kubernetesEventEvaluator)
 
-	if incidents == nil && deployments == nil && alerts == nil {
+	if incidents == nil && deployments == nil && alerts == nil && isolations == nil {
 		return
 	}
 
@@ -69,7 +79,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 				} else {
 					for _, project := range projects {
 						if project.Multicluster() {
-							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, project.Id)
+							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, isolations, project.Id)
 						}
 					}
 				}
@@ -84,7 +94,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 					continue
 				}
 
-				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, projectId)
+				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, isolations, projectId)
 
 				if time.Since(lastSpaceManagerRun) >= time.Hour {
 					lastSpaceManagerRun = time.Now()
@@ -95,7 +105,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 	}()
 }
 
-func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, projectId db.ProjectId) {
+func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, isolations *Isolations, projectId db.ProjectId) {
 	start := time.Now()
 	project, err := database.GetProject(projectId)
 	if err != nil {
@@ -189,6 +199,13 @@ func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.M
 		go func() {
 			defer wg.Done()
 			deployments.Check(project, world)
+		}()
+	}
+	if isolations != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			isolations.Check(project, world)
 		}()
 	}
 	if alerts != nil {

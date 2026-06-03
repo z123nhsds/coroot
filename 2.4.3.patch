@@ -1,0 +1,274 @@
+diff --git a/auditor/auditor.go b/auditor/auditor.go
+index 196b059..311d420 100644
+--- a/auditor/auditor.go
++++ b/auditor/auditor.go
+@@ -67,7 +67,6 @@ func Audit(w *model.World, p *db.Project, generateDetailedReportFor *model.Appli
+ 		stages.stage("nodejs", a.nodejs)
+ 		stages.stage("logs", a.logs)
+ 		stages.stage("deployments", a.deployments)
+-
+ 		for _, r := range a.reports {
+ 			widgets := a.enrichWidgets(r.Widgets, app.Events)
+ 			sort.SliceStable(widgets, func(i, j int) bool {
+diff --git a/db/db.go b/db/db.go
+index 4939a6e..7d0fd02 100644
+--- a/db/db.go
++++ b/db/db.go
+@@ -121,6 +121,7 @@ func (db *DB) Migrate(extraTables ...Table) error {
+ 		&User{},
+ 		&AlertingRule{},
+ 		&Alert{},
++		&Isolation{},
+ 	}
+ 	return db.Migrator().Migrate(append(defaultTables, extraTables...)...)
+ }
+diff --git a/model/check.go b/model/check.go
+index a90c881..5645e4d 100644
+--- a/model/check.go
++++ b/model/check.go
+@@ -70,7 +70,6 @@ var Checks = struct {
+ 	MemoryOOM                  CheckConfig
+ 	MemoryLeakPercent          CheckConfig
+ 	MemoryPressure             CheckConfig
+-	StorageSpace               CheckConfig
+ 	StorageIOLoad              CheckConfig
+ 	NetworkRTT                 CheckConfig
+ 	NetworkRTTExternal         CheckConfig
+@@ -166,15 +165,6 @@ var Checks = struct {
+ 		MessageTemplate:         `high memory stall time on {{.Items "instances"}}`,
+ 		ConditionFormatTemplate: "memory stall time > <threshold> per second",
+ 	},
+-	StorageIOLoad: CheckConfig{
+-		Category:                AuditReportStorage,
+-		Type:                    CheckTypeItemBased,
+-		Title:                   "Disk I/O load",
+-		DefaultThreshold:        5,
+-		Unit:                    CheckUnitSecondsPerSecond,
+-		MessageTemplate:         `high I/O load of {{.Items "volume"}}`,
+-		ConditionFormatTemplate: "the I/O load of a volume > <threshold>",
+-	},
+ 	StorageSpace: CheckConfig{
+ 		Category:                AuditReportStorage,
+ 		Type:                    CheckTypeItemBased,
+diff --git a/model/world.go b/model/world.go
+index b5ffdcc..a1ebffa 100644
+--- a/model/world.go
++++ b/model/world.go
+@@ -30,8 +30,6 @@ type World struct {
+ 	IntegrationStatus IntegrationStatus
+ 
+ 	ProjectNamesById map[string]string
+-}
+-
+ func NewWorld(from, to timeseries.Time, step, rawStep timeseries.Duration) *World {
+ 	return &World{
+ 		Ctx:              timeseries.Context{From: from, To: to, Step: step, RawStep: rawStep},
+diff --git a/rbac/action.go b/rbac/action.go
+index 3d98f72..72cdb91 100644
+--- a/rbac/action.go
++++ b/rbac/action.go
+@@ -27,13 +27,13 @@ const (
+ 	ScopeProjectCosts                 Scope = "project.costs"
+ 	ScopeProjectAnomalies             Scope = "project.anomalies"
+ 	ScopeProjectRisks                 Scope = "project.risks"
++	ScopeProjectIsolations            Scope = "project.isolations"
+ 	ScopeApplication                  Scope = "project.application"
+ 	ScopeNode                         Scope = "project.node"
+ 	ScopeDashboards                   Scope = "project.dashboards"
+ 	ScopeDashboard                    Scope = "project.dashboard"
+ 	ScopeProjectAlertingRules         Scope = "project.alerting_rules"
+ 	ScopeProjectAlerts                Scope = "project.alerts"
+-)
+ 
+ type Action struct {
+ 	Scope  Scope
+diff --git a/rbac/actions.go b/rbac/actions.go
+index 153b192..c0f407d 100644
+--- a/rbac/actions.go
++++ b/rbac/actions.go
+@@ -84,8 +84,6 @@ func (as ProjectActionSet) List() []Action {
+ 		as.AlertingRules().Edit(),
+ 		as.Alerts().View(),
+ 		as.Alerts().Edit(),
+-	}
+-}
+ 
+ func (as ProjectActionSet) Settings() ProjectEditAction {
+ 	return ProjectEditAction{project: &as, scope: ScopeProjectSettings}
+@@ -163,10 +161,6 @@ func (as ProjectActionSet) Alerts() ProjectAction {
+ 	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
+ }
+ 
+-type ProjectViewAction struct {
+-	project *ProjectActionSet
+-	scope   Scope
+-}
+ 
+ func (as ProjectViewAction) View() Action {
+ 	return NewAction(as.scope, ActionView, as.project.object())
+diff --git a/rbac/role.go b/rbac/role.go
+index c78f404..ab7e1ee 100644
+--- a/rbac/role.go
++++ b/rbac/role.go
+@@ -7,7 +7,8 @@ import (
+ const (
+ 	RoleAdmin  RoleName = "Admin"
+ 	RoleEditor RoleName = "Editor"
+-	RoleViewer RoleName = "Viewer"
++	RoleViewer             RoleName = "Viewer"
++	RoleIsolationOperation RoleName = "IsolationOperation"
+ )
+ 
+ var (
+@@ -29,13 +30,11 @@ var (
+ 		NewRole(RoleViewer,
+ 			NewPermission(ScopeAll, ActionView, nil),
+ 		),
++		NewRole(RoleIsolationOperation,
++			NewPermission(ScopeProjectIsolations, ActionEdit, nil),
++		),
+ 	}
+ )
+-
+-type RoleName string
+-
+-func (r RoleName) Valid(roles []Role) bool {
+-	return slices.ContainsFunc(roles, func(role Role) bool { return role.Name == r })
+ }
+ 
+ func (r RoleName) Builtin() bool {
+diff --git a/stats/stats.go b/stats/stats.go
+index c6515f2..0875702 100644
+--- a/stats/stats.go
++++ b/stats/stats.go
+@@ -71,6 +71,7 @@ type Stats struct {
+ 		Instances           int                                 `json:"instances"`
+ 		Deployments         int                                 `json:"deployments"`
+ 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
++		Isolations          int                                 `json:"isolations"`
+ 		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
+ 	} `json:"infra"`
+ 	UX struct {
+@@ -85,11 +86,6 @@ type Stats struct {
+ 		McpCalls          map[string]int             `json:"mcp_calls"`
+ 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
+ 	} `json:"ux"`
+-	Performance struct {
+-		Constructor constructor.Profile `json:"constructor"`
+-		Auditor     auditor.Profile     `json:"auditor"`
+-		Components  []*Component        `json:"components"`
+-	} `json:"performance"`
+ 	Profile struct {
+ 		From   int64  `json:"from"`
+ 		To     int64  `json:"to"`
+@@ -525,29 +521,16 @@ func (c *Collector) collect() Stats {
+ 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
+ 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
+ 
++	if count, err := c.db.GetIsolationsCount(); err == nil {
++		stats.Infra.Isolations = count
++	}
++
+ 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
+ 
+ 	return stats
+ }
+ 
+ func corootComponents(components []*model.Application) []*Component {
+-	var res []*Component
+-	for _, a := range components {
+-		aa := &Component{Id: a.Id}
+-		res = append(res, aa)
+-		for _, i := range a.Instances {
+-			if i.IsObsolete() {
+-				continue
+-			}
+-			ii := &Instance{Containers: map[string]*Container{}}
+-			aa.Instances = append(aa.Instances, ii)
+-			for _, c := range i.Containers {
+-				if c.InitContainer {
+-					continue
+-				}
+-				cc := &Container{}
+-				ii.Containers[c.Name] = cc
+-				cc.CpuLimit = timeseries.Value(c.CpuLimit.Last())
+ 				cc.CpuUsage = timeseries.Value(c.CpuUsage.Last())
+ 				cc.CpuDelay = timeseries.Value(c.CpuDelay.Last())
+ 				cc.CpuThrottling = timeseries.Value(c.ThrottledTime.Last())
+diff --git a/watchers/watchers.go b/watchers/watchers.go
+index 03639f3..9edf670 100644
+--- a/watchers/watchers.go
++++ b/watchers/watchers.go
+@@ -12,6 +12,7 @@ import (
+ 	"github.com/coroot/coroot/config"
+ 	"github.com/coroot/coroot/constructor"
+ 	"github.com/coroot/coroot/db"
++	"github.com/coroot/coroot/notifications"
+ 	"github.com/coroot/coroot/timeseries"
+ 	"golang.org/x/exp/maps"
+ 	"k8s.io/klog"
+@@ -19,13 +20,22 @@ import (
+ 
+ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, checkDeployments bool, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus, spaceManagerCfg config.ClickHouseSpaceManager, logPatternEvaluator LogPatternEvaluator, kubernetesEventEvaluator KubernetesEventEvaluator) {
+ 	var deployments *Deployments
++	var isolations *Isolations
+ 	if checkDeployments {
+ 		deployments = NewDeployments(database, pricing)
+ 	}
++	
++	var incidentNotifier *notifications.IncidentNotifier
++	if incidents != nil {
++		incidentNotifier = incidents.notifier
++	} else {
++		incidentNotifier = notifications.NewIncidentNotifier(database)
++	}
++	isolations = NewIsolations(database, incidentNotifier)
+ 
+ 	alerts := NewAlerts(database, globalPrometheus, globalClickHouse, logPatternEvaluator, kubernetesEventEvaluator)
+ 
+-	if incidents == nil && deployments == nil && alerts == nil {
++	if incidents == nil && deployments == nil && alerts == nil && isolations == nil {
+ 		return
+ 	}
+ 
+@@ -69,7 +79,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 				} else {
+ 					for _, project := range projects {
+ 						if project.Multicluster() {
+-							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, project.Id)
++							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, isolations, project.Id)
+ 						}
+ 					}
+ 				}
+@@ -84,7 +94,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 					continue
+ 				}
+ 
+-				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, projectId)
++				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, isolations, projectId)
+ 
+ 				if time.Since(lastSpaceManagerRun) >= time.Hour {
+ 					lastSpaceManagerRun = time.Now()
+@@ -95,7 +105,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 	}()
+ }
+ 
+-func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, projectId db.ProjectId) {
++func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, isolations *Isolations, projectId db.ProjectId) {
+ 	start := time.Now()
+ 	project, err := database.GetProject(projectId)
+ 	if err != nil {
+@@ -191,6 +201,13 @@ func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.M
+ 			deployments.Check(project, world)
+ 		}()
+ 	}
++	if isolations != nil {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			isolations.Check(project, world)
++		}()
++	}
+ 	if alerts != nil {
+ 		wg.Add(1)
+ 		go func() {

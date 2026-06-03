@@ -70,7 +70,6 @@ var Checks = struct {
 	MemoryOOM                  CheckConfig
 	MemoryLeakPercent          CheckConfig
 	MemoryPressure             CheckConfig
-	StorageSpace               CheckConfig
 	StorageIOLoad              CheckConfig
 	NetworkRTT                 CheckConfig
 	NetworkRTTExternal         CheckConfig
@@ -165,15 +164,6 @@ var Checks = struct {
 		Unit:                    CheckUnitSecond,
 		MessageTemplate:         `high memory stall time on {{.Items "instances"}}`,
 		ConditionFormatTemplate: "memory stall time > <threshold> per second",
-	},
-	StorageIOLoad: CheckConfig{
-		Category:                AuditReportStorage,
-		Type:                    CheckTypeItemBased,
-		Title:                   "Disk I/O load",
-		DefaultThreshold:        5,
-		Unit:                    CheckUnitSecondsPerSecond,
-		MessageTemplate:         `high I/O load of {{.Items "volume"}}`,
-		ConditionFormatTemplate: "the I/O load of a volume > <threshold>",
 	},
 	StorageSpace: CheckConfig{
 		Category:                AuditReportStorage,

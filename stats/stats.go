@@ -71,6 +71,7 @@ type Stats struct {
 		Instances           int                                 `json:"instances"`
 		Deployments         int                                 `json:"deployments"`
 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
+		Isolations          int                                 `json:"isolations"`
 		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
 	} `json:"infra"`
 	UX struct {
@@ -85,11 +86,6 @@ type Stats struct {
 		McpCalls          map[string]int             `json:"mcp_calls"`
 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
 	} `json:"ux"`
-	Performance struct {
-		Constructor constructor.Profile `json:"constructor"`
-		Auditor     auditor.Profile     `json:"auditor"`
-		Components  []*Component        `json:"components"`
-	} `json:"performance"`
 	Profile struct {
 		From   int64  `json:"from"`
 		To     int64  `json:"to"`
@@ -525,29 +521,16 @@ func (c *Collector) collect() Stats {
 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
 
+	if count, err := c.db.GetIsolationsCount(); err == nil {
+		stats.Infra.Isolations = count
+	}
+
 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
 
 	return stats
 }
 
 func corootComponents(components []*model.Application) []*Component {
-	var res []*Component
-	for _, a := range components {
-		aa := &Component{Id: a.Id}
-		res = append(res, aa)
-		for _, i := range a.Instances {
-			if i.IsObsolete() {
-				continue
-			}
-			ii := &Instance{Containers: map[string]*Container{}}
-			aa.Instances = append(aa.Instances, ii)
-			for _, c := range i.Containers {
-				if c.InitContainer {
-					continue
-				}
-				cc := &Container{}
-				ii.Containers[c.Name] = cc
-				cc.CpuLimit = timeseries.Value(c.CpuLimit.Last())
 				cc.CpuUsage = timeseries.Value(c.CpuUsage.Last())
 				cc.CpuDelay = timeseries.Value(c.CpuDelay.Last())
 				cc.CpuThrottling = timeseries.Value(c.ThrottledTime.Last())

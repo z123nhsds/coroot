@@ -84,8 +84,6 @@ func (as ProjectActionSet) List() []Action {
 		as.AlertingRules().Edit(),
 		as.Alerts().View(),
 		as.Alerts().Edit(),
-	}
-}
 
 func (as ProjectActionSet) Settings() ProjectEditAction {
 	return ProjectEditAction{project: &as, scope: ScopeProjectSettings}
@@ -163,10 +161,6 @@ func (as ProjectActionSet) Alerts() ProjectAction {
 	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
 }
 
-type ProjectViewAction struct {
-	project *ProjectActionSet
-	scope   Scope
-}
 
 func (as ProjectViewAction) View() Action {
 	return NewAction(as.scope, ActionView, as.project.object())

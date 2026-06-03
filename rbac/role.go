@@ -7,7 +7,8 @@ import (
 const (
 	RoleAdmin  RoleName = "Admin"
 	RoleEditor RoleName = "Editor"
-	RoleViewer RoleName = "Viewer"
+	RoleViewer             RoleName = "Viewer"
+	RoleIsolationOperation RoleName = "IsolationOperation"
 )
 
 var (
@@ -29,13 +30,11 @@ var (
 		NewRole(RoleViewer,
 			NewPermission(ScopeAll, ActionView, nil),
 		),
+		NewRole(RoleIsolationOperation,
+			NewPermission(ScopeProjectIsolations, ActionEdit, nil),
+		),
 	}
 )
-
-type RoleName string
-
-func (r RoleName) Valid(roles []Role) bool {
-	return slices.ContainsFunc(roles, func(role Role) bool { return role.Name == r })
 }
 
 func (r RoleName) Builtin() bool {
