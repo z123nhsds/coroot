@@ -1,0 +1,806 @@
+diff --git a/2.7.4.patch b/2.7.4.patch
+new file mode 100644
+index 0000000..e69de29
+diff --git a/auditor/memory_regression_test.go b/auditor/memory_regression_test.go
+new file mode 100644
+index 0000000..f88e621
+--- /dev/null
++++ b/auditor/memory_regression_test.go
+@@ -0,0 +1,189 @@
++package auditor
++
++import (
++	"testing"
++
++	"github.com/coroot/coroot/timeseries"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestMemoryGrowthPct_SteadyGrowth(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(100*1024*1024) + float32(i)*float32(2*1024*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Greater(t, pct, float32(0))
++	assert.LessOrEqual(t, pct, float32(100))
++}
++
++func TestMemoryGrowthPct_EmptyData(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	ts := timeseries.New(start, 30, step)
++
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), start)
++	assert.Equal(t, float32(0), pct)
++}
++
++func TestMemoryGrowthPct_ManyNaN(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		if i%3 == 0 {
++			v := float32(100*1024*1024) + float32(i)*float32(1*1024*1024)
++			ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++		}
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Equal(t, float32(0), pct)
++}
++
++func TestMemoryGrowthPct_DecreasingTrend(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(500*1024*1024) - float32(i)*float32(1*1024*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Equal(t, float32(0), pct)
++}
++
++func TestMemoryGrowthPct_SuddenDropResetsStreak(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 20
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points/2; i++ {
++		v := float32(100*1024*1024) + float32(i)*float32(3*1024*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++	for i := points / 2; i < points; i++ {
++		v := float32(50*1024*1024) + float32(i-points/2)*float32(2*1024*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Greater(t, pct, float32(0))
++}
++
++func TestMemoryGrowthPct_TooFewPoints(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 5
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(100*1024*1024) + float32(i)*float32(2*1024*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Equal(t, float32(0), pct)
++}
++
++func TestMemoryGrowthPct_StableMemory(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), float32(200*1024*1024))
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Equal(t, float32(0), pct)
++}
++
++func TestMemoryGrowthPct_BelowMinGrowth(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(100*1024*1024) + float32(i)*float32(100*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Equal(t, float32(0), pct)
++}
++
++func TestMemoryGrowthPct_WithLimitExceeded(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(500*1024*1024) + float32(i)*float32(10*1024*1024)
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Greater(t, pct, float32(0))
++}
++
++func TestMemoryGrowthPct_TailGrowthAcceleration(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(100*1024*1024) + float32(i)*float32(1*1024*1024)
++		if i > points-10 {
++			v += float32(i-points+10) * float32(5*1024*1024)
++		}
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Greater(t, pct, float32(0))
++}
++
++func TestMemoryGrowthPct_TailGrowthTooShort(t *testing.T) {
++	step := timeseries.Duration(60)
++	start := timeseries.Time(1000)
++	points := 30
++
++	ts := timeseries.New(start, points, step)
++	for i := 0; i < points; i++ {
++		v := float32(100*1024*1024) + float32(i)*float32(2*1024*1024)
++		if i > points-3 {
++			v += float32(i-points+3) * float32(10*1024*1024)
++		}
++		ts.Set(start+timeseries.Time(int64(i)*int64(step)), v)
++	}
++
++	to := start + timeseries.Time(int64(points-1)*int64(step))
++	pct := MemoryGrowthPct(ts, float32(1024*1024*1024), to)
++	assert.Equal(t, float32(0), pct)
++}
+\ No newline at end of file
+diff --git a/prom/health_regression_test.go b/prom/health_regression_test.go
+new file mode 100644
+index 0000000..a53a9a4
+--- /dev/null
++++ b/prom/health_regression_test.go
+@@ -0,0 +1,91 @@
++package prom
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/coroot/coroot/db"
++	"github.com/coroot/coroot/timeseries"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestHealthProbeEndpoint(t *testing.T) {
++	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer ts.Close()
++
++	resp, err := http.Get(ts.URL)
++	require.NoError(t, err)
++	assert.Equal(t, http.StatusOK, resp.StatusCode)
++}
++
++func TestPrometheusHealthCheckViaQueryRange(t *testing.T) {
++	data := `{"status":"success","data":{"resultType":"matrix","result":[]}}`
++
++	h := func(w http.ResponseWriter, r *http.Request) {
++		assert.Equal(t, http.MethodPost, r.Method)
++		assert.Equal(t, "/api/v1/query_range", r.URL.Path)
++		w.Write([]byte(data))
++	}
++	ts := httptest.NewServer(http.HandlerFunc(h))
++	defer ts.Close()
++
++	cfg := &db.IntegrationPrometheus{
++		Url:           ts.URL,
++		TlsSkipVerify: true,
++	}
++	client, err := NewClient(cfg, nil)
++	require.NoError(t, err)
++
++	ctx := context.Background()
++	now := timeseries.Now()
++	res, err := client.QueryRange(ctx, `up`, nil, now.Add(-timeseries.Minute), now, timeseries.Duration(15))
++	assert.NoError(t, err)
++	assert.NotNil(t, res)
++}
++
++func TestClickHouseClientNilConfig(t *testing.T) {
++	_, err := newClickHouse(nil, timeseries.Minute)
++	assert.Error(t, err)
++}
++
++func TestPrometheusHTTPClientTimeout(t *testing.T) {
++	cfg := &db.IntegrationPrometheus{
++		Url:           "http://localhost:1",
++		TlsSkipVerify: true,
++	}
++	client, err := NewClient(cfg, nil)
++	require.NoError(t, err)
++
++	ctx := context.Background()
++	now := timeseries.Now()
++	_, err = client.QueryRange(ctx, `up`, nil, now.Add(-timeseries.Minute), now, timeseries.Duration(15))
++	assert.Error(t, err)
++}
++
++func TestPrintfFormatSafety(t *testing.T) {
++	check := func(src, extraSelector, expected string) {
++		actual, err := AddExtraSelector(src, extraSelector)
++		assert.NoError(t, err)
++		assert.Equal(t, expected, actual)
++	}
++
++	check(
++		`rate(metric{label="%s"}[1m])`,
++		`{cluster="test"}`,
++		`rate(metric{cluster="test",label="%s"}[1m])`)
++
++	check(
++		`rate(metric{label="%d"}[1m])`,
++		`{env="prod"}`,
++		`rate(metric{env="prod",label="%d"}[1m])`)
++
++	check(
++		`rate(metric{label="%v"}[1m])`,
++		`{region="us-east"}`,
++		`rate(metric{region="us-east",label="%v"}[1m])`)
++}
+\ No newline at end of file
+diff --git a/rbac/mcp_regression_test.go b/rbac/mcp_regression_test.go
+new file mode 100644
+index 0000000..1ba2173
+--- /dev/null
++++ b/rbac/mcp_regression_test.go
+@@ -0,0 +1,139 @@
++package rbac
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestMCPPermissionsForLogClustering(t *testing.T) {
++	viewer := NewPermission(ScopeProjectAll, ActionView, nil)
++	assert.True(t, viewer.allows(Actions.Project("*").Node("*").View()))
++	assert.False(t, viewer.allows(Actions.Project("*").Settings().Edit()))
++
++	editor := NewPermission(ScopeProjectAll, ActionEdit, nil)
++	assert.True(t, editor.allows(Actions.Project("*").Settings().Edit()))
++	assert.False(t, editor.allows(Actions.Project("*").Node("*").View()))
++
++	allViewer := NewPermission(ScopeAll, ActionView, nil)
++	assert.True(t, allViewer.allows(Actions.Project("*").Node("*").View()))
++	assert.True(t, allViewer.allows(Actions.Settings().Edit()))
++}
++
++func TestMCPProjectScopedPermissions(t *testing.T) {
++	viewerProjectScoped := NewPermission(ScopeProjectAll, ActionView, Object{"project_id": "prod-cluster"})
++	assert.True(t, viewerProjectScoped.allows(Actions.Project("*").Node("*").View()))
++	assert.True(t, viewerProjectScoped.allows(Actions.Project("prod-cluster").Node("any-node").View()))
++	assert.False(t, viewerProjectScoped.allows(Actions.Project("staging-cluster").Node("any-node").View()))
++}
++
++func TestMCPNodeScopePermissions(t *testing.T) {
++	nodeViewer := NewPermission(ScopeNode, ActionView, Object{"node_name": "prod-*"})
++	assert.True(t, nodeViewer.allows(Actions.Project("*").Node("*").View()))
++	assert.True(t, nodeViewer.allows(Actions.Project("cluster-1").Node("prod-node-1").View()))
++	assert.True(t, nodeViewer.allows(Actions.Project("cluster-1").Node("prod-node-2").View()))
++	assert.False(t, nodeViewer.allows(Actions.Project("cluster-1").Node("staging-node-1").View()))
++}
++
++func TestMCPApplicationScopePermissions(t *testing.T) {
++	app := NewPermission(ScopeApplication, ActionView, Object{
++		"application_id": "cluster-1:default:Deployment:api-gateway",
++	})
++	assert.True(t, app.allows(Actions.Project("*").Application("*", "*", "*", "*").View()))
++	assert.False(t, app.allows(Actions.Project("*").Node("*").View()))
++}
++
++func TestMCPRolePermissions(t *testing.T) {
++	role := &Role{
++		Name: "LogViewer",
++		Permissions: PermissionSet{
++			NewPermission(ScopeProjectAll, ActionView, nil),
++		},
++	}
++	assert.True(t, role.Permissions.Allows(Actions.Project("*").Node("*").View()))
++	assert.False(t, role.Permissions.Allows(Actions.Project("*").Settings().Edit()))
++}
++
++func TestMCPEmptyPermissionDeniesAll(t *testing.T) {
++	p := NewPermission(ScopeNode, ActionView, Object{"node_name": ""})
++	assert.False(t, p.allows(Actions.Project("*").Node("*").View()))
++	assert.False(t, p.allows(Actions.Project("foo").Node("foo").View()))
++	assert.False(t, p.allows(Actions.Project("bar").Node("bar").View()))
++}
++
++func TestMCPNilPermission(t *testing.T) {
++	p := NewPermission(ScopeAll, ActionView, nil)
++	assert.True(t, p.allows(Actions.Project("*").Node("*").View()))
++	assert.True(t, p.allows(Actions.Project("any-project").Node("any-node").View()))
++}
++
++func TestMCPWildcardPermissionAllowsAll(t *testing.T) {
++	p := NewPermission(ScopeNode, ActionView, Object{"node_name": "*"})
++	assert.True(t, p.allows(Actions.Project("*").Node("*").View()))
++	assert.True(t, p.allows(Actions.Project("a").Node("b").View()))
++	assert.True(t, p.allows(Actions.Project("x").Node("y").View()))
++}
++
++func TestMCPApplicationCategoryPermission(t *testing.T) {
++	p := NewPermission(ScopeProjectApplicationCategories, ActionEdit, nil)
++	assert.True(t, p.allows(Actions.Project("*").ApplicationCategories().Edit()))
++	assert.False(t, p.allows(Actions.Project("*").ApplicationCategories().View()))
++}
++
++func TestMCPAlertsPermission(t *testing.T) {
++	p := NewPermission(ScopeProjectAlerts, ActionEdit, nil)
++	assert.True(t, p.allows(Actions.Project("*").Alerts().Edit()))
++	assert.False(t, p.allows(Actions.Project("*").Alerts().View()))
++}
++
++func TestMCPRisksPermission(t *testing.T) {
++	p := NewPermission(ScopeProjectRisks, ActionEdit, nil)
++	assert.True(t, p.allows(Actions.Project("*").Risks().Edit()))
++	assert.False(t, p.allows(Actions.Project("*").Risks().View()))
++}
++
++func TestMCPStaticRoleManager(t *testing.T) {
++	mgr := NewStaticRoleManager()
++	roles, err := mgr.GetRoles()
++	assert.NoError(t, err)
++	assert.Len(t, roles, 3)
++
++	names := map[RoleName]bool{}
++	for _, r := range roles {
++		names[r.Name] = true
++	}
++	assert.True(t, names[RoleAdmin])
++	assert.True(t, names[RoleEditor])
++	assert.True(t, names[RoleViewer])
++}
++
++func TestMCPAdminRoleHasFullAccess(t *testing.T) {
++	mgr := NewStaticRoleManager()
++	roles, _ := mgr.GetRoles()
++	var admin *Role
++	for i := range roles {
++		if roles[i].Name == RoleAdmin {
++			admin = &roles[i]
++			break
++		}
++	}
++	assert.NotNil(t, admin)
++	assert.True(t, admin.Permissions.Allows(Actions.Project("*").Node("*").View()))
++	assert.True(t, admin.Permissions.Allows(Actions.Project("*").Settings().Edit()))
++	assert.True(t, admin.Permissions.Allows(Actions.Users().Edit()))
++}
++
++func TestMCPViewerRoleHasViewOnly(t *testing.T) {
++	mgr := NewStaticRoleManager()
++	roles, _ := mgr.GetRoles()
++	var viewer *Role
++	for i := range roles {
++		if roles[i].Name == RoleViewer {
++			viewer = &roles[i]
++			break
++		}
++	}
++	assert.NotNil(t, viewer)
++	assert.True(t, viewer.Permissions.Allows(Actions.Project("*").Node("*").View()))
++	assert.False(t, viewer.Permissions.Allows(Actions.Project("*").Settings().Edit()))
++}
+\ No newline at end of file
+diff --git a/utils/watchers_health_regression_test.go b/utils/watchers_health_regression_test.go
+new file mode 100644
+index 0000000..2fc46ff
+--- /dev/null
++++ b/utils/watchers_health_regression_test.go
+@@ -0,0 +1,200 @@
++package utils
++
++import (
++	"testing"
++
++	"github.com/coroot/coroot/timeseries"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestNanoIdGeneration(t *testing.T) {
++	id1 := NanoId(8)
++	id2 := NanoId(8)
++	assert.Len(t, id1, 8)
++	assert.Len(t, id2, 8)
++	assert.NotEqual(t, id1, id2)
++}
++
++func TestNanoIdVariousLengths(t *testing.T) {
++	for _, n := range []int{4, 8, 12, 16, 21} {
++		id := NanoId(n)
++		assert.Len(t, id, n, "length %d", n)
++	}
++}
++
++func TestStringSetOperations(t *testing.T) {
++	ss := NewStringSet("a", "b", "c")
++	assert.Equal(t, 3, ss.Len())
++	assert.True(t, ss.Has("a"))
++	assert.True(t, ss.Has("b"))
++	assert.True(t, ss.Has("c"))
++	assert.False(t, ss.Has("d"))
++
++	ss.Add("d", "e")
++	assert.Equal(t, 5, ss.Len())
++	assert.True(t, ss.Has("d"))
++	assert.True(t, ss.Has("e"))
++
++	ss.Delete("a")
++	assert.Equal(t, 4, ss.Len())
++	assert.False(t, ss.Has("a"))
++
++	items := ss.Items()
++	assert.Equal(t, []string{"b", "c", "d", "e"}, items)
++}
++
++func TestStringSetEmpty(t *testing.T) {
++	ss := NewStringSet()
++	assert.Equal(t, 0, ss.Len())
++	assert.False(t, ss.Has("anything"))
++	assert.Equal(t, "", ss.GetFirst())
++	assert.Equal(t, []string{}, ss.Items())
++}
++
++func TestStringSetAddEmptyStrings(t *testing.T) {
++	ss := NewStringSet()
++	ss.Add("")
++	assert.Equal(t, 0, ss.Len())
++	ss.Add("a", "", "b")
++	assert.Equal(t, 2, ss.Len())
++}
++
++func TestStringSetNilReceiver(t *testing.T) {
++	var ss *StringSet
++	assert.False(t, ss.Has("a"))
++	assert.Equal(t, []string{}, ss.Items())
++	assert.Equal(t, 0, ss.Len())
++}
++
++func TestGlobMatch(t *testing.T) {
++	assert.True(t, GlobMatch("project.*", "project.*"))
++	assert.True(t, GlobMatch("project.*", "project.settings"))
++	assert.True(t, GlobMatch("*", "anything"))
++	assert.True(t, GlobMatch("project.*", "project.alerts"))
++	assert.False(t, GlobMatch("project.*", "users.edit"))
++	assert.True(t, GlobMatch("project.application", "project.application"))
++	assert.False(t, GlobMatch("project.application", "project.node"))
++}
++
++func TestGlobMatchWildcards(t *testing.T) {
++	assert.True(t, GlobMatch("node-*", "node-1"))
++	assert.True(t, GlobMatch("node-*", "node-prod"))
++	assert.False(t, GlobMatch("node-*", "pod-1"))
++	assert.True(t, GlobMatch("*-service", "user-service"))
++	assert.True(t, GlobMatch("*-service", "payment-service"))
++	assert.False(t, GlobMatch("*-service", "user-deployment"))
++}
++
++func TestLastPart(t *testing.T) {
++	assert.Equal(t, "abc123", LastPart("nginx-deployment-abc123", "-"))
++	assert.Equal(t, "v1", LastPart("app:v1", ":"))
++	assert.Equal(t, "suffix", LastPart("prefix.suffix", "."))
++	assert.Equal(t, "only", LastPart("only", "-"))
++}
++
++func TestFormatImage(t *testing.T) {
++	assert.Equal(t, "catalog:0.33", FormatImage("docker.io/organization/catalog:0.33"))
++	assert.Equal(t, "img:95048a46", FormatImage("docker.io/orgg/img:95048a46"))
++	assert.Equal(t, "package-image@sha256:2d01d1a", FormatImage("repo.io/org/package-image@sha256:2d01d1af064c8cdb32f51406f4148091cd0c87168c41725a62110aae9a6a44b4"))
++	assert.Equal(t, "nginx:latest", FormatImage("nginx:latest"))
++	assert.Equal(t, "busybox:1.36", FormatImage("library/busybox:1.36"))
++}
++
++func TestFormatFloat(t *testing.T) {
++	assert.Equal(t, "0", FormatFloat(0))
++	assert.Equal(t, "1", FormatFloat(1))
++	assert.Equal(t, "10", FormatFloat(10))
++	assert.Equal(t, "0.1", FormatFloat(0.1))
++	assert.Equal(t, "0.01", FormatFloat(0.01))
++	assert.Equal(t, "0.001", FormatFloat(0.001))
++	assert.Equal(t, "", FormatFloat(timeseries.NaN))
++	assert.Equal(t, "1.2", FormatFloat(1.234))
++}
++
++func TestFormatDuration(t *testing.T) {
++	d := timeseries.Duration(5 * 60) // 5 minutes
++	result := FormatDuration(d, 2)
++	assert.NotEmpty(t, result)
++
++	d = timeseries.Duration(3600) // 1 hour
++	result = FormatDuration(d, 2)
++	assert.NotEmpty(t, result)
++
++	d = timeseries.Duration(0)
++	result = FormatDuration(d, 2)
++	assert.NotEmpty(t, result)
++}
++
++func TestFormatDurationShort(t *testing.T) {
++	d := timeseries.Duration(300)
++	result := FormatDurationShort(d, 2)
++	assert.NotEmpty(t, result)
++}
++
++func TestFormatBytes(t *testing.T) {
++	val, unit := FormatBytes(0)
++	assert.Equal(t, "0", val)
++	assert.Equal(t, "B", unit)
++
++	val, unit = FormatBytes(1024)
++	assert.NotEmpty(t, val)
++
++	val, unit = FormatBytes(1048576)
++	assert.NotEmpty(t, val)
++
++	val, unit = FormatBytes(float32(timeseries.NaN))
++	assert.NotEmpty(t, val)
++}
++
++func TestFormatPercentage(t *testing.T) {
++	assert.Equal(t, "0%", FormatPercentage(0))
++	assert.Equal(t, "50%", FormatPercentage(50))
++	assert.Equal(t, "99.99%", FormatPercentage(99.99))
++	assert.Equal(t, "100%", FormatPercentage(100))
++}
++
++func TestUniq(t *testing.T) {
++	assert.Equal(t, []int{1, 2, 3}, Uniq([]int{1, 2, 2, 3, 3, 3}))
++	assert.Equal(t, []string{"a", "b"}, Uniq([]string{"a", "b", "a"}))
++	assert.Equal(t, []int{}, Uniq([]int{}))
++}
++
++func TestPtr(t *testing.T) {
++	p := Ptr(42)
++	assert.NotNil(t, p)
++	assert.Equal(t, 42, *p)
++
++	s := Ptr("hello")
++	assert.NotNil(t, s)
++	assert.Equal(t, "hello", *s)
++
++	b := Ptr(true)
++	assert.NotNil(t, b)
++	assert.Equal(t, true, *b)
++}
++
++func TestStringSetMarshalJSON(t *testing.T) {
++	ss := NewStringSet("a", "b", "c")
++	data, err := ss.MarshalJSON()
++	assert.NoError(t, err)
++	assert.Equal(t, `["a","b","c"]`, string(data))
++
++	empty := NewStringSet()
++	data, err = empty.MarshalJSON()
++	assert.NoError(t, err)
++	assert.Equal(t, `[]`, string(data))
++}
++
++func TestStringSetUnmarshalJSON(t *testing.T) {
++	ss := NewStringSet()
++	err := ss.UnmarshalJSON([]byte(`["x","y","z"]`))
++	assert.NoError(t, err)
++	assert.Equal(t, 3, ss.Len())
++	assert.True(t, ss.Has("x"))
++	assert.True(t, ss.Has("y"))
++	assert.True(t, ss.Has("z"))
++
++	err = ss.UnmarshalJSON([]byte(`[]`))
++	assert.NoError(t, err)
++	assert.Equal(t, 3, ss.Len())
++}
+\ No newline at end of file
+diff --git a/watchers/rca_slo_regression_test.go b/watchers/rca_slo_regression_test.go
+new file mode 100644
+index 0000000..1453a8a
+--- /dev/null
++++ b/watchers/rca_slo_regression_test.go
+@@ -0,0 +1,149 @@
++package watchers
++
++import (
++	"testing"
++
++	"github.com/coroot/coroot/model"
++	"github.com/coroot/coroot/prom"
++	"github.com/coroot/coroot/timeseries"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRCAIncidentSLOAlertLinkage(t *testing.T) {
++	incident := &model.ApplicationIncident{
++		ApplicationId: model.NewApplicationId("cluster-1", "default", model.ApplicationKindDeployment, "api-gateway"),
++		Key:           "abc12345",
++		OpenedAt:      timeseries.Now(),
++		Severity:      model.WARNING,
++		Details: model.IncidentDetails{
++			AvailabilityBurnRates: []model.BurnRate{
++				{Severity: model.WARNING, Threshold: 14.4, LongWindow: timeseries.Hour, ShortWindow: 5 * timeseries.Minute},
++			},
++			LatencyBurnRates: []model.BurnRate{
++				{Severity: model.CRITICAL, Threshold: 6, LongWindow: 6 * timeseries.Hour, ShortWindow: 15 * timeseries.Minute},
++			},
++			AvailabilityImpact: model.Impact{AffectedRequestPercentage: 0},
++			LatencyImpact:      model.Impact{AffectedRequestPercentage: 5.2},
++		},
++	}
++	assert.Equal(t, "High latency", incident.ShortDescription())
++
++	incident.Details.AvailabilityImpact.AffectedRequestPercentage = 3.1
++	incident.Details.LatencyImpact.AffectedRequestPercentage = 4.0
++	assert.Equal(t, "High latency and errors", incident.ShortDescription())
++
++	incident.Details.LatencyImpact.AffectedRequestPercentage = 0
++	incident.Details.AvailabilityImpact.AffectedRequestPercentage = 2.5
++	assert.Equal(t, "Elevated error rate", incident.ShortDescription())
++
++	incident.Details.AvailabilityImpact.AffectedRequestPercentage = 0
++	incident.Details.LatencyImpact.AffectedRequestPercentage = 0
++	assert.Equal(t, "SLO violation", incident.ShortDescription())
++
++	incident.RCA = &model.RCA{ShortSummary: "CPU throttling caused by node resource pressure"}
++	assert.Equal(t, "CPU throttling caused by node resource pressure", incident.ShortDescription())
++}
++
++func TestRCAIncidentResolvedState(t *testing.T) {
++	incident := &model.ApplicationIncident{
++		ApplicationId: model.NewApplicationId("cluster-1", "default", model.ApplicationKindDeployment, "api-gateway"),
++		Key:           "abc12345",
++		OpenedAt:      timeseries.Now(),
++		Severity:      model.OK,
++		ResolvedAt:    timeseries.Now(),
++		Details: model.IncidentDetails{
++			AvailabilityBurnRates: []model.BurnRate{
++				{Severity: model.OK, Threshold: 14.4, LongWindow: timeseries.Hour, ShortWindow: 5 * timeseries.Minute},
++			},
++			LatencyBurnRates: []model.BurnRate{
++				{Severity: model.OK, Threshold: 6, LongWindow: 6 * timeseries.Hour, ShortWindow: 15 * timeseries.Minute},
++			},
++		},
++	}
++	assert.True(t, incident.Resolved())
++	assert.Equal(t, "SLO violation", incident.ShortDescription())
++}
++
++func TestRCAOpenResolvedAtZero(t *testing.T) {
++	incident := &model.ApplicationIncident{
++		ApplicationId: model.NewApplicationId("cluster-1", "default", model.ApplicationKindDeployment, "api-gateway"),
++		Key:           "inc-open",
++		OpenedAt:      timeseries.Now(),
++		Severity:      model.WARNING,
++		ResolvedAt:    0,
++	}
++	assert.False(t, incident.Resolved())
++}
++
++func TestPromExtraSelectorSLOQueries(t *testing.T) {
++	check := func(src, extraSelector, expected string) {
++		actual, err := prom.AddExtraSelector(src, extraSelector)
++		assert.NoError(t, err)
++		assert.Equal(t, expected, actual)
++	}
++
++	check(
++		`sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))`,
++		`{cluster="prod-us-east"}`,
++		`sum(rate(http_requests_total{cluster="prod-us-east",status=~"5.."}[5m])) / sum(rate(http_requests_total{cluster="prod-us-east"}[5m]))`)
++
++	check(
++		`histogram_quantile(0.99, sum(rate(request_latency_bucket[5m])) by (le))`,
++		`{cluster="prod-us-east", namespace="default"}`,
++		`histogram_quantile(0.99, sum(rate(request_latency_bucket{cluster="prod-us-east",namespace="default"}[5m])) by (le))`)
++
++	check(
++		`rate(http_requests_total{status="200"}[5m])`,
++		`{cluster="staging"}`,
++		`rate(http_requests_total{cluster="staging",status="200"}[5m])`)
++}
++
++func TestRCAPropagationMap(t *testing.T) {
++	app := &model.PropagationMapApplication{
++		Id:     model.NewApplicationId("c1", "ns", model.ApplicationKindDeployment, "svc"),
++		Status: model.OK,
++	}
++	assert.Equal(t, model.OK, app.Status)
++	app.Issue("memory leak detected")
++	assert.Equal(t, 1, len(app.Issues))
++	app.Issue("memory leak detected")
++	assert.Equal(t, 1, len(app.Issues))
++	app.Issue("high latency")
++	assert.Equal(t, 2, len(app.Issues))
++
++	link := &model.PropagationMapApplicationLink{
++		Id:     model.NewApplicationId("c1", "ns", model.ApplicationKindDeployment, "db"),
++		Status: model.OK,
++	}
++	link.AddIssues("connection timeout", "slow query")
++	assert.Equal(t, model.CRITICAL, link.Status)
++	assert.Equal(t, 2, link.Stats.Len())
++}
++
++func TestBurnRateSeverityOrdering(t *testing.T) {
++	burnRates := []model.BurnRate{
++		{Severity: model.OK, LongWindowBurnRate: 0.5, LongWindow: timeseries.Hour, ShortWindow: 5 * timeseries.Minute},
++		{Severity: model.WARNING, LongWindowBurnRate: 1.5, LongWindow: timeseries.Hour, ShortWindow: 5 * timeseries.Minute},
++		{Severity: model.CRITICAL, LongWindowBurnRate: 5.0, LongWindow: timeseries.Hour, ShortWindow: 5 * timeseries.Minute},
++	}
++
++	var maxSeverity model.Status = model.UNKNOWN
++	for _, br := range burnRates {
++		if br.Severity > maxSeverity {
++			maxSeverity = br.Severity
++		}
++	}
++	assert.Equal(t, model.CRITICAL, maxSeverity)
++
++	allOK := []model.BurnRate{
++		{Severity: model.OK, LongWindowBurnRate: 0.1, LongWindow: timeseries.Hour, ShortWindow: 5 * timeseries.Minute},
++		{Severity: model.OK, LongWindowBurnRate: 0.2, LongWindow: 6 * timeseries.Hour, ShortWindow: 15 * timeseries.Minute},
++	}
++	var maxOK model.Status = model.UNKNOWN
++	for _, br := range allOK {
++		if br.Severity > maxOK {
++			maxOK = br.Severity
++		}
++	}
++	assert.Equal(t, model.OK, maxOK)
++}
+\ No newline at end of file
