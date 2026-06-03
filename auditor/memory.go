@@ -42,7 +42,6 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 
 	seenContainers := false
 	limitByContainer := map[string]*timeseries.Aggregate{}
-	rssByContainer := map[string]map[string]*timeseries.TimeSeries{}
 	periodicJob := a.app.PeriodicJob()
 	for _, i := range a.app.Instances {
 		oom := timeseries.NewAggregate(timeseries.NanSum)
@@ -57,10 +56,6 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 				limitByContainer[c.Name] = timeseries.NewAggregate(timeseries.Max)
 			}
 			limitByContainer[c.Name].Add(c.MemoryLimit)
-			if rssByContainer[c.Name] == nil {
-				rssByContainer[c.Name] = map[string]*timeseries.TimeSeries{}
-			}
-			rssByContainer[c.Name][i.Name] = c.MemoryRss
 			if usageChart != nil {
 				usageChart.GetOrCreateChart("RSS container: "+c.Name).AddSeries(i.Name, c.MemoryRss)
 			}
@@ -124,19 +119,8 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 
 	if periodicJob {
 		leakCheck.SetStatus(model.UNKNOWN, "not checked for periodic jobs")
-	} else {
-		var maxPct float32
-		for container, byInstance := range rssByContainer {
-			limit := limitByContainer[container].Get().Reduce(timeseries.Max)
-			for _, rss := range byInstance {
-				if pct := MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
-					maxPct = pct
-				}
-			}
-		}
-		if maxPct > 0 {
-			leakCheck.SetValue(maxPct)
-		}
+	} else if maxPct := AppMemoryGrowthPct(a.app, a.w.Ctx.To); maxPct > 0 {
+		leakCheck.SetValue(maxPct)
 	}
 
 	if usageChart != nil {
@@ -154,6 +138,39 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 		pressureCheck.SetStatus(model.UNKNOWN, "no data")
 		return
 	}
+}
+
+func AppMemoryGrowthPct(app *model.Application, to timeseries.Time) float32 {
+	limitsByContainer := map[string]float32{}
+	var containers []*model.Container
+	for _, i := range app.Instances {
+		for _, c := range i.Containers {
+			if c == nil {
+				continue
+			}
+			containers = append(containers, c)
+			if c.MemoryLimit == nil || c.MemoryLimit.IsEmpty() {
+				continue
+			}
+			if limit := c.MemoryLimit.Reduce(timeseries.Max); !timeseries.IsNaN(limit) {
+				if current, ok := limitsByContainer[c.Name]; !ok || limit > current {
+					limitsByContainer[c.Name] = limit
+				}
+			}
+		}
+	}
+
+	var maxPct float32
+	for _, c := range containers {
+		limit := timeseries.NaN
+		if v, ok := limitsByContainer[c.Name]; ok {
+			limit = v
+		}
+		if pct := MemoryGrowthPct(c.MemoryRss, limit, to); pct > maxPct {
+			maxPct = pct
+		}
+	}
+	return maxPct
 }
 
 func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {

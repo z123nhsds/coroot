@@ -35,6 +35,13 @@ jobs:
   build-images:
     needs: build-frontend
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+      digest: ${{ steps.build.outputs.digest }}
+      hashes: ${{ steps.hashes.outputs.subjects }}
     steps:
       - uses: actions/checkout@v5
 
@@ -58,7 +65,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: release image reference
+        id: image
+        run: echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           platforms: linux/amd64, linux/arm64
@@ -67,16 +79,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
-            
+
       - name: extract amd64 binary from the image
         run: |
-          docker create --platform linux/amd64 --name amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} && 
+          docker create --platform linux/amd64 --name amd64 ${{ steps.image.outputs.ref }} &&
           docker cp amd64:/usr/bin/coroot /tmp/coroot-amd64
 
       - name: extract arm64 binary from the image
         run: |
-          docker create --platform linux/arm64 --name arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} &&
+          docker create --platform linux/arm64 --name arm64 ${{ steps.image.outputs.ref }} &&
           docker cp arm64:/usr/bin/coroot /tmp/coroot-arm64
+
+      - name: hash release binaries for SLSA3 provenance
+        id: hashes
+        run: echo "subjects=$(sha256sum /tmp/coroot-amd64 /tmp/coroot-arm64 | base64 -w0)" >> "$GITHUB_OUTPUT"
 
       - name: upload amd64 binary
         uses: actions/upload-release-asset@v1
@@ -111,3 +127,28 @@ jobs:
               prerelease: false,
               make_latest: true
             })
+
+  provenance-binaries:
+    needs: build-images
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build-images.outputs.hashes }}
+      upload-assets: true
+
+  provenance-image:
+    needs: build-images
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ${{ needs.build-images.outputs.image }}
+      digest: ${{ needs.build-images.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}

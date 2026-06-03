@@ -1,6 +1,6 @@
 module github.com/coroot/coroot
 
-go 1.25.5
+go 1.25
 
 require (
 	github.com/ClickHouse/ch-go v0.62.0

@@ -1,0 +1,257 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index f0e2ca6..35f7d3a 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -35,6 +35,13 @@ jobs:
+   build-images:
+     needs: build-frontend
+     runs-on: ubuntu-22.04
++    permissions:
++      contents: write
++      packages: write
++    outputs:
++      image: ${{ steps.image.outputs.ref }}
++      digest: ${{ steps.build.outputs.digest }}
++      hashes: ${{ steps.hashes.outputs.subjects }}
+     steps:
+       - uses: actions/checkout@v5
+ 
+@@ -58,7 +65,12 @@ jobs:
+           username: ${{ github.actor }}
+           password: ${{ secrets.GITHUB_TOKEN }}
+ 
++      - name: release image reference
++        id: image
++        run: echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}" >> "$GITHUB_OUTPUT"
++
+       - uses: docker/build-push-action@v6
++        id: build
+         with:
+           context: .
+           platforms: linux/amd64, linux/arm64
+@@ -67,17 +79,21 @@ jobs:
+           labels: ${{ steps.meta.outputs.labels }}
+           build-args: |
+             VERSION=${{ steps.meta.outputs.version }}
+-            
++
+       - name: extract amd64 binary from the image
+         run: |
+-          docker create --platform linux/amd64 --name amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} && 
++          docker create --platform linux/amd64 --name amd64 ${{ steps.image.outputs.ref }} &&
+           docker cp amd64:/usr/bin/coroot /tmp/coroot-amd64
+ 
+       - name: extract arm64 binary from the image
+         run: |
+-          docker create --platform linux/arm64 --name arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} &&
++          docker create --platform linux/arm64 --name arm64 ${{ steps.image.outputs.ref }} &&
+           docker cp arm64:/usr/bin/coroot /tmp/coroot-arm64
+ 
++      - name: hash release binaries for SLSA3 provenance
++        id: hashes
++        run: echo "subjects=$(sha256sum /tmp/coroot-amd64 /tmp/coroot-arm64 | base64 -w0)" >> "$GITHUB_OUTPUT"
++
+       - name: upload amd64 binary
+         uses: actions/upload-release-asset@v1
+         env:
+@@ -111,3 +127,28 @@ jobs:
+               prerelease: false,
+               make_latest: true
+             })
++
++  provenance-binaries:
++    needs: build-images
++    permissions:
++      actions: read
++      contents: write
++      id-token: write
++    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
++    with:
++      base64-subjects: ${{ needs.build-images.outputs.hashes }}
++      upload-assets: true
++
++  provenance-image:
++    needs: build-images
++    permissions:
++      actions: read
++      id-token: write
++      packages: write
++    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
++    with:
++      image: ${{ needs.build-images.outputs.image }}
++      digest: ${{ needs.build-images.outputs.digest }}
++      registry-username: ${{ github.actor }}
++    secrets:
++      registry-password: ${{ secrets.GITHUB_TOKEN }}
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..b8bf142 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -42,7 +42,6 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 
+ 	seenContainers := false
+ 	limitByContainer := map[string]*timeseries.Aggregate{}
+-	rssByContainer := map[string]map[string]*timeseries.TimeSeries{}
+ 	periodicJob := a.app.PeriodicJob()
+ 	for _, i := range a.app.Instances {
+ 		oom := timeseries.NewAggregate(timeseries.NanSum)
+@@ -57,10 +56,6 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 				limitByContainer[c.Name] = timeseries.NewAggregate(timeseries.Max)
+ 			}
+ 			limitByContainer[c.Name].Add(c.MemoryLimit)
+-			if rssByContainer[c.Name] == nil {
+-				rssByContainer[c.Name] = map[string]*timeseries.TimeSeries{}
+-			}
+-			rssByContainer[c.Name][i.Name] = c.MemoryRss
+ 			if usageChart != nil {
+ 				usageChart.GetOrCreateChart("RSS container: "+c.Name).AddSeries(i.Name, c.MemoryRss)
+ 			}
+@@ -124,19 +119,8 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 
+ 	if periodicJob {
+ 		leakCheck.SetStatus(model.UNKNOWN, "not checked for periodic jobs")
+-	} else {
+-		var maxPct float32
+-		for container, byInstance := range rssByContainer {
+-			limit := limitByContainer[container].Get().Reduce(timeseries.Max)
+-			for _, rss := range byInstance {
+-				if pct := MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
+-					maxPct = pct
+-				}
+-			}
+-		}
+-		if maxPct > 0 {
+-			leakCheck.SetValue(maxPct)
+-		}
++	} else if maxPct := AppMemoryGrowthPct(a.app, a.w.Ctx.To); maxPct > 0 {
++		leakCheck.SetValue(maxPct)
+ 	}
+ 
+ 	if usageChart != nil {
+@@ -156,6 +140,39 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 	}
+ }
+ 
++func AppMemoryGrowthPct(app *model.Application, to timeseries.Time) float32 {
++	limitsByContainer := map[string]float32{}
++	var containers []*model.Container
++	for _, i := range app.Instances {
++		for _, c := range i.Containers {
++			if c == nil {
++				continue
++			}
++			containers = append(containers, c)
++			if c.MemoryLimit == nil || c.MemoryLimit.IsEmpty() {
++				continue
++			}
++			if limit := c.MemoryLimit.Reduce(timeseries.Max); !timeseries.IsNaN(limit) {
++				if current, ok := limitsByContainer[c.Name]; !ok || limit > current {
++					limitsByContainer[c.Name] = limit
++				}
++			}
++		}
++	}
++
++	var maxPct float32
++	for _, c := range containers {
++		limit := timeseries.NaN
++		if v, ok := limitsByContainer[c.Name]; ok {
++			limit = v
++		}
++		if pct := MemoryGrowthPct(c.MemoryRss, limit, to); pct > maxPct {
++			maxPct = pct
++		}
++	}
++	return maxPct
++}
++
+ func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+ 	if rss.IsEmpty() {
+ 		return 0
+diff --git a/go.mod b/go.mod
+index 479355f..a72e728 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/coroot/coroot
+ 
+-go 1.25.5
++go 1.25
+ 
+ require (
+ 	github.com/ClickHouse/ch-go v0.62.0
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..a6f4e0f 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -261,7 +261,7 @@ func calcDeployments(app *model.Application) []*model.ApplicationDeployment {
+ 			}
+ 			if deployment == nil {
+ 				name := ""
+-				for _, n := range rss.names { // get some new name
++				for _, n := range rss.names {
+ 					if n != prev {
+ 						name = n
+ 						break
+@@ -320,12 +320,10 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step
+ 			memUsage.Add(c.MemoryRss)
+ 			restarts.Add(c.Restarts)
+ 			oomKills.Add(c.OOMKills)
+-			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
+-				ms.MemoryLeakPercent = pct
+-			}
+ 		}
+ 	}
+ 	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
++	ms.MemoryLeakPercent = auditor.AppMemoryGrowthPct(app, to)
+ 	if totalMem := memUsage.Get(); !totalMem.IsEmpty() {
+ 		s := totalMem.Reduce(timeseries.NanSum)
+ 		c := totalMem.Map(timeseries.Defined).Reduce(timeseries.NanSum)
+diff --git a/watchers/deployments_test.go b/watchers/deployments_test.go
+index 63ce0e3..796dfbb 100644
+--- a/watchers/deployments_test.go
++++ b/watchers/deployments_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"strings"
+ 	"testing"
+ 
++	"github.com/coroot/coroot/auditor"
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+ 	"github.com/stretchr/testify/assert"
+@@ -93,3 +94,35 @@ func TestCalcDeployments(t *testing.T) {
+ 	addInstance("i2", "rs2", 0, 0, 1, 1, 0, 0)
+ 	checkDeployments("3-0:rs2;5-5:rs1")
+ }
++
++func TestCalcMetricsSnapshotReusesAppMemoryGrowthPct(t *testing.T) {
++	app := model.NewApplication(model.NewApplicationId("", "default", model.ApplicationKindDeployment, "catalog"))
++	first := app.GetOrCreateInstance("i1", nil)
++	second := app.GetOrCreateInstance("i2", nil)
++
++	leakingRSS := timeseries.NewWithData(0, 10*timeseries.Minute, []float32{
++		1 << 30,
++		1<<30 + 60<<20,
++		1<<30 + 120<<20,
++		1<<30 + 180<<20,
++		1<<30 + 240<<20,
++		1<<30 + 300<<20,
++		1<<30 + 360<<20,
++		1<<30 + 420<<20,
++		1<<30 + 480<<20,
++		1<<30 + 540<<20,
++		1<<30 + 600<<20,
++		1<<30 + 660<<20,
++	})
++	firstLimit := timeseries.NewWithData(0, 10*timeseries.Minute, []float32{1.5 * 1024 * 1024 * 1024})
++	secondLimit := timeseries.NewWithData(0, 10*timeseries.Minute, []float32{4 * 1024 * 1024 * 1024})
++
++	first.Containers = []*model.Container{{Name: "api", MemoryRss: leakingRSS, MemoryLimit: firstLimit}}
++	second.Containers = []*model.Container{{Name: "api", MemoryRss: timeseries.NewWithData(0, 10*timeseries.Minute, []float32{1 << 30}), MemoryLimit: secondLimit}}
++
++	to := timeseries.Time(11 * 10 * timeseries.Minute)
++	snapshot := calcMetricsSnapshot(app, 0, to, 10*timeseries.Minute)
++	expected := auditor.MemoryGrowthPct(leakingRSS, secondLimit.Reduce(timeseries.Max), to)
++
++	assert.InDelta(t, expected, snapshot.MemoryLeakPercent, 0.001)
++}

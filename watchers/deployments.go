@@ -261,7 +261,7 @@ func calcDeployments(app *model.Application) []*model.ApplicationDeployment {
 			}
 			if deployment == nil {
 				name := ""
-				for _, n := range rss.names { // get some new name
+				for _, n := range rss.names {
 					if n != prev {
 						name = n
 						break
@@ -320,12 +320,10 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step 
 			memUsage.Add(c.MemoryRss)
 			restarts.Add(c.Restarts)
 			oomKills.Add(c.OOMKills)
-			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
-				ms.MemoryLeakPercent = pct
-			}
 		}
 	}
 	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
+	ms.MemoryLeakPercent = auditor.AppMemoryGrowthPct(app, to)
 	if totalMem := memUsage.Get(); !totalMem.IsEmpty() {
 		s := totalMem.Reduce(timeseries.NanSum)
 		c := totalMem.Map(timeseries.Defined).Reduce(timeseries.NanSum)
