@@ -5,9 +5,10 @@ type Scope string
 type Object map[string]string
 
 const (
-	ActionAll  Verb = "*"
-	ActionView Verb = "view"
-	ActionEdit Verb = "edit"
+	ActionAll     Verb = "*"
+	ActionView    Verb = "view"
+	ActionEdit    Verb = "edit"
+	ActionIsolate Verb = "isolate"
 
 	ScopeAll                          Scope = "*"
 	ScopeSettings                     Scope = "settings"
@@ -27,7 +28,7 @@ const (
 	ScopeProjectCosts                 Scope = "project.costs"
 	ScopeProjectAnomalies             Scope = "project.anomalies"
 	ScopeProjectRisks                 Scope = "project.risks"
-	ScopeApplication                  Scope = "project.application"
+	ScopeProjectIsolation             Scope = "project.isolation"
 	ScopeNode                         Scope = "project.node"
 	ScopeDashboards                   Scope = "project.dashboards"
 	ScopeDashboard                    Scope = "project.dashboard"

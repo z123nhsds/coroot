@@ -71,7 +71,7 @@ type Stats struct {
 		Instances           int                                 `json:"instances"`
 		Deployments         int                                 `json:"deployments"`
 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
-		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
+		Isolations          *model.IsolationStats               `json:"isolations,omitempty"`
 	} `json:"infra"`
 	UX struct {
 		WorldLoadTimeAvg  float32                    `json:"world_load_time_avg"`
@@ -517,13 +517,23 @@ func (c *Collector) collect() Stats {
 			}
 		}
 
+		if isoStats, err := c.db.GetIsolationStats(p.Id); err == nil {
+			if stats.Infra.Isolations == nil {
+				stats.Infra.Isolations = isoStats
+			} else {
+				stats.Infra.Isolations.TotalIsolations += isoStats.TotalIsolations
+				stats.Infra.Isolations.ActiveIsolations += isoStats.ActiveIsolations
+				stats.Infra.Isolations.TotalRestored += isoStats.TotalRestored
+				stats.Infra.Isolations.TotalCancelled += isoStats.TotalCancelled
+				for k, v := range isoStats.IsolationsByKind {
+					stats.Infra.Isolations.IsolationsByKind[k] += v
+				}
+			}
+		}
+
 		stats.Performance.Components = append(stats.Performance.Components, corootComponents(w.GetCorootComponents())...)
 	}
 
-	stats.Integration.ApplicationCategories = applicationCategories.Len()
-
-	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
-	stats.UX.AuditTimeAvg = avgDuration(auditTime)
 
 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
 

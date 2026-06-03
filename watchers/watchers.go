@@ -12,30 +12,29 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/constructor"
 	"github.com/coroot/coroot/db"
+	"github.com/coroot/coroot/isolator"
 	"github.com/coroot/coroot/timeseries"
 	"golang.org/x/exp/maps"
 	"k8s.io/klog"
 )
 
-func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, checkDeployments bool, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus, spaceManagerCfg config.ClickHouseSpaceManager, logPatternEvaluator LogPatternEvaluator, kubernetesEventEvaluator KubernetesEventEvaluator) {
+func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, iso *isolator.Isolator, checkDeployments bool, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus, spaceManagerCfg config.ClickHouseSpaceManager, logPatternEvaluator LogPatternEvaluator, kubernetesEventEvaluator KubernetesEventEvaluator) {
 	var deployments *Deployments
 	if checkDeployments {
 		deployments = NewDeployments(database, pricing)
 	}
 
 	alerts := NewAlerts(database, globalPrometheus, globalClickHouse, logPatternEvaluator, kubernetesEventEvaluator)
-
-	if incidents == nil && deployments == nil && alerts == nil {
-		return
-	}
-
-	projectChan := make(chan db.ProjectId, 1000)
-
-	pending := map[db.ProjectId]bool{}
 	pendingLock := sync.Mutex{}
 	lastSpaceManagerRun := time.Time{}
 
-	// Fast consumer goroutine - just receives and deduplicates
+	if incidents == nil && deployments == nil && alerts == nil && iso == nil {
+		return
+	}
+
+	pending := map[db.ProjectId]bool{}
+	projectChan := make(chan db.ProjectId, 1000)
+
 	go func() {
 		for projectId := range mcache.Updates() {
 			pendingLock.Lock()
@@ -44,7 +43,6 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 				select {
 				case projectChan <- projectId:
 				default:
-					// Channel full, skip this update
 					pending[projectId] = false
 				}
 			}
@@ -54,7 +52,6 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 	}()
 
 	go func() {
-		// multi-cluster projects are skipped in the cache updater, so we need to check Incidents and Deployments by a ticker
 		ticker := time.NewTicker(cache.MinRefreshInterval.ToStandard()).C
 
 		for {
@@ -69,12 +66,11 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 				} else {
 					for _, project := range projects {
 						if project.Multicluster() {
-							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, project.Id)
+							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, iso, project.Id)
 						}
 					}
 				}
 			case projectId := <-projectChan:
-				// Remove from pending set
 				pendingLock.Lock()
 				delete(pending, projectId)
 				pendingLock.Unlock()
@@ -84,7 +80,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 					continue
 				}
 
-				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, projectId)
+				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, iso, projectId)
 
 				if time.Since(lastSpaceManagerRun) >= time.Hour {
 					lastSpaceManagerRun = time.Now()
@@ -95,7 +91,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
 	}()
 }
 
-func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, projectId db.ProjectId) {
+func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, iso *isolator.Isolator, projectId db.ProjectId) {
 	start := time.Now()
 	project, err := database.GetProject(projectId)
 	if err != nil {
@@ -198,15 +194,17 @@ func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.M
 			alerts.Check(project, world, from, to, step)
 		}()
 	}
+	if iso != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			iso.Check(project, world)
+		}()
+	}
 	wg.Wait()
-	klog.Infof("%s: iteration done in %s", project.Id, time.Since(start).Truncate(time.Millisecond))
 }
 
 func runSpaceManagerOnce(cfg config.ClickHouseSpaceManager, database *db.DB, globalClickHouse *db.IntegrationClickhouse) {
-	if !cfg.Enabled {
-		klog.Infof("clickhouse space manager disabled")
-		return
-	}
 	projects, err := database.GetProjects()
 	if err != nil {
 		klog.Errorf("clickhouse space manager: failed to get projects: %v", err)

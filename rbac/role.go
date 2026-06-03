@@ -5,9 +5,10 @@ import (
 )
 
 const (
-	RoleAdmin  RoleName = "Admin"
-	RoleEditor RoleName = "Editor"
-	RoleViewer RoleName = "Viewer"
+	RoleAdmin             RoleName = "Admin"
+	RoleEditor            RoleName = "Editor"
+	RoleViewer            RoleName = "Viewer"
+	RoleIsolationOperator RoleName = "IsolationOperator"
 )
 
 var (
@@ -25,13 +26,18 @@ var (
 			NewPermission(ScopeDashboards, ActionEdit, nil),
 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
+			NewPermission(ScopeProjectIsolation, ActionView, nil),
 		),
 		NewRole(RoleViewer,
 			NewPermission(ScopeAll, ActionView, nil),
 		),
+		NewRole(RoleIsolationOperator,
+			NewPermission(ScopeAll, ActionView, nil),
+			NewPermission(ScopeProjectIsolation, ActionView, nil),
+			NewPermission(ScopeProjectIsolation, ActionIsolate, nil),
+		),
 	}
 )
-
 type RoleName string
 
 func (r RoleName) Valid(roles []Role) bool {

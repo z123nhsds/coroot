@@ -20,6 +20,7 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/grpc"
+	"github.com/coroot/coroot/isolator"
 	"github.com/coroot/coroot/rbac"
 	"github.com/coroot/coroot/stats"
 	"github.com/coroot/coroot/utils"
@@ -66,7 +67,7 @@ func main() {
 	if err != nil {
 		klog.Exitln(err)
 	}
-	if err = database.Migrate(); err != nil {
+	if err = database.Migrate(&db.IsolationRecord{}); err != nil {
 		klog.Exitln(err)
 	}
 
@@ -144,7 +145,9 @@ func main() {
 
 	incidents := watchers.NewIncidents(database, a.IncidentRCA)
 
-	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
+	iso := isolator.NewIsolator(database, nil)
+
+	watchers.Start(database, promCache, pricing, incidents, iso, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
 
 	router := mux.NewRouter()
 	router.Use(statsCollector.MiddleWare)
