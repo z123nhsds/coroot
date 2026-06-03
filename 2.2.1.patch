@@ -1,0 +1,369 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index f0e2ca6..5f032de 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -35,10 +35,6 @@ jobs:
+   build-images:
+     needs: build-frontend
+     runs-on: ubuntu-22.04
+-    steps:
+-      - uses: actions/checkout@v5
+-
+-      - uses: actions/download-artifact@v4
+ 
+       - uses: docker/setup-qemu-action@v3
+       - uses: docker/setup-buildx-action@v3
+@@ -63,7 +59,6 @@ jobs:
+           context: .
+           platforms: linux/amd64, linux/arm64
+           push: true
+-          tags: ${{ steps.meta.outputs.tags }}
+           labels: ${{ steps.meta.outputs.labels }}
+           build-args: |
+             VERSION=${{ steps.meta.outputs.version }}
+@@ -83,31 +78,3 @@ jobs:
+         env:
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+         with:
+-          upload_url: ${{ github.event.release.upload_url }}
+-          asset_path: /tmp/coroot-amd64
+-          asset_name: coroot-amd64
+-          asset_content_type: application/octet-stream
+-
+-      - name: upload arm64 binary
+-        uses: actions/upload-release-asset@v1
+-        env:
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+-        with:
+-          upload_url: ${{ github.event.release.upload_url }}
+-          asset_path: /tmp/coroot-arm64
+-          asset_name: coroot-arm64
+-          asset_content_type: application/octet-stream
+-
+-      - uses: actions/github-script@v7
+-        env:
+-          RELEASE_ID: ${{ github.event.release.id }}
+-        with:
+-          script: |
+-            const { RELEASE_ID } = process.env
+-            github.rest.repos.updateRelease({
+-              owner: context.repo.owner,
+-              repo: context.repo.repo,
+-              release_id: `${RELEASE_ID}`,
+-              prerelease: false,
+-              make_latest: true
+-            })
+diff --git a/api/mcp.go b/api/mcp.go
+index f7b4344..01dab87 100644
+--- a/api/mcp.go
++++ b/api/mcp.go
+@@ -366,21 +366,6 @@ func (h *MCPHandler) registerTools() {
+ 		),
+ 		h.toolQueryLogs,
+ 	)
+-}
+-
+-func (h *MCPHandler) toolListProjects(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+-	user := mcpUserFromContext(ctx)
+-	if user == nil {
+-		return mcp.NewToolResultError("unauthorized"), nil
+-	}
+-	names, err := h.Api.db.GetProjectNames()
+-	if err != nil {
+-		klog.Errorln("mcp: list_projects:", err)
+-		return mcp.NewToolResultError("failed to load projects"), nil
+-	}
+-	out := map[string]string{}
+-	for id, name := range names {
+-		if !h.Api.IsAllowed(user, rbac.Actions.Project(string(id)).List()...) {
+ 			continue
+ 		}
+ 		out[name] = string(id)
+diff --git a/model/application_deployment.go b/model/application_deployment.go
+index 6cb970d..99ea924 100644
+--- a/model/application_deployment.go
++++ b/model/application_deployment.go
+@@ -32,25 +32,6 @@ const (
+ 	ApplicationDeploymentStateSummary
+ )
+ 
+-type ApplicationDeployment struct {
+-	ApplicationId ApplicationId
+-	Name          string
+-	StartedAt     timeseries.Time
+-	FinishedAt    timeseries.Time
+-
+-	Details *ApplicationDeploymentDetails
+-
+-	MetricsSnapshot *MetricsSnapshot
+-
+-	Notifications *ApplicationDeploymentNotifications
+-}
+-
+-func (d *ApplicationDeployment) Hash() string {
+-	return utils.LastPart(d.Name, "-")
+-}
+-
+-func (d *ApplicationDeployment) Id() string {
+-	return d.Hash() + ":" + strconv.FormatInt(int64(d.StartedAt), 10)
+ }
+ 
+ func (d *ApplicationDeployment) Version() string {
+@@ -96,14 +77,13 @@ type ApplicationDeploymentNotifications struct {
+ 	Teams struct {
+ 		State ApplicationDeploymentState `json:"state"`
+ 	} `json:"teams"`
+-	Webhook struct {
+-		State ApplicationDeploymentState `json:"state"`
+-	} `json:"webhook"`
+-}
+-
+-type ApplicationDeploymentSummary struct {
+-	Report  AuditReportName `json:"report"`
+-	Ok      bool            `json:"ok"`
++	Restarts          int64   `json:"restarts"`
++	CPUUsage          float32 `json:"cpu_usage"`
++	MemoryLeakPercent float32 `json:"memory_leak_percent"`
++	MemoryUsage       int64   `json:"memory_usage"`
++	OOMKills          int64   `json:"oom_kills"`
++	LogErrors         int64   `json:"log_errors"`
++	LogWarnings       int64   `json:"log_warnings"`
+ 	Message string          `json:"message"`
+ 	Time    timeseries.Time `json:"time"`
+ }
+@@ -287,22 +267,9 @@ func CalcApplicationDeploymentSummary(app *Application, checkConfigs CheckConfig
+ 			} else {
+ 				perRequestCurr := float32(curr.LogErrors) / float32(curr.Requests)
+ 				perRequestPrev := float32(prev.LogErrors) / float32(prev.Requests)
+-				diff := (perRequestCurr - perRequestPrev) * 100 / perRequestPrev
+-				if float32(math.Abs(float64(diff))) > significantPercentageDifference {
+-					ok := false
+-					verb := "increased"
+-					if diff < 0 {
+-						ok = true
+-						verb = "decreased"
+-					}
+-					add(AuditReportLogs, ok, "Logs: the number of errors in the logs has %s by %d%%", verb, int(math.Abs(float64(diff))))
+-				}
++		add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour)", curr.MemoryLeakPercent)
+ 			}
+-		}
+-	}
+-
+-	for i := range res {
+-		res[i].Time = t
++		add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed")
+ 	}
+ 	return res, status
+ }
+diff --git a/model/check.go b/model/check.go
+index a90c881..92d62aa 100644
+--- a/model/check.go
++++ b/model/check.go
+@@ -553,20 +553,15 @@ func (ch *Check) Fire() {
+ }
+ 
+ func (ch *Check) SetStatus(status Status, format string, a ...any) {
+-	ch.Status = status
+-	ch.Message = fmt.Sprintf(format, a...)
+-}
+-
++	if len(a) == 0 {
++		ch.items.Add(format)
++		return
++	}
+ func (ch *Check) AddItem(format string, a ...any) {
+ 	if len(a) == 0 {
+ 		ch.items.Add(format)
+ 		return
+ 	}
+-	ch.items.Add(fmt.Sprintf(format, a...))
+-}
+-
+-func (ch *Check) Count() int64 {
+-	return ch.count
+ }
+ 
+ func (ch *Check) Inc(amount int64) {
+@@ -617,15 +612,15 @@ func (ch *Check) Calc() {
+ 	}
+ 	buf := &bytes.Buffer{}
+ 	if err := t.Execute(buf, CheckContext{items: ch.items, count: ch.count, value: ch.value, unit: ch.Unit, threshold: ch.Threshold}); err != nil {
+-		ch.SetStatus(UNKNOWN, "failed to render message: %s", err)
++		ch.SetStatus(UNKNOWN, "invalid template: %s", err)
+ 		return
+ 	}
+ 	ch.SetStatus(WARNING, "%s", buf.String())
+ }
+-
++		ch.SetStatus(UNKNOWN, "failed to render message: %s", err)
+ type CheckConfigSource string
+ 
+-const (
++	ch.SetStatus(WARNING, "%s", buf.String())
+ 	CheckConfigSourceKubernetesAnnotations CheckConfigSource = "kubernetes-annotations"
+ )
+ 
+diff --git a/model/table.go b/model/table.go
+index 261cb5a..3282b85 100644
+--- a/model/table.go
++++ b/model/table.go
+@@ -177,10 +177,6 @@ func (c *TableCell) AddTag(format string, a ...any) *TableCell {
+ 	} else {
+ 		c.Tags = append(c.Tags, fmt.Sprintf(format, a...))
+ 	}
+-	return c
+-}
+-
+-func (c *TableCell) SetProgress(percent int, color string) *TableCell {
+ 	if c == nil {
+ 		return nil
+ 	}
+@@ -200,16 +196,7 @@ func (c *TableCell) SetStub(format string, a ...any) *TableCell {
+ 	if c == nil {
+ 		return nil
+ 	}
+-	c.Value = fmt.Sprintf(format, a...)
+-	c.IsStub = true
+-	return c
+-}
+-
+-func (c *TableCell) SetMaxWidth(w int) *TableCell {
+-	if c == nil {
+-		return nil
+-	}
+-	c.MaxWidth = w
++func (c *TableCell) SetStub(format string, a ...any) *TableCell {
+ 	return c
+ }
+ 
+diff --git a/notifications/webhook.go b/notifications/webhook.go
+index 0fe5d99..9b60848 100644
+--- a/notifications/webhook.go
++++ b/notifications/webhook.go
+@@ -106,7 +106,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
+ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+ 	tmpl, err := template.New("incidentTemplate").Funcs(templateFunctions).Parse(wh.cfg.IncidentTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid incident template: %s", err)
++		return fmt.Errorf("invalid incident template: %w", err)
+ 	}
+ 
+ 	var data bytes.Buffer
+@@ -122,7 +122,7 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
+ 	}
+ 	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid incident template: %s", err)
++		return fmt.Errorf("invalid incident template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+@@ -134,7 +134,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	}
+ 	tmpl, err := template.New("alertTemplate").Funcs(templateFunctions).Parse(wh.cfg.AlertTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid alert template: %s", err)
++		return fmt.Errorf("invalid alert template: %w", err)
+ 	}
+ 
+ 	var data bytes.Buffer
+@@ -154,7 +154,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	}
+ 	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid alert template: %s", err)
++		return fmt.Errorf("invalid alert template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+@@ -163,7 +163,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+ 	tmpl, err := template.New("deploymentTemplate").Funcs(templateFunctions).Parse(wh.cfg.DeploymentTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid deployment template: %s", err)
++		return fmt.Errorf("invalid deployment template: %w", err)
+ 	}
+ 
+ 	status := "Deployed"
+@@ -193,7 +193,7 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
+ 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
+ 	}, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid deployment template: %s", err)
++		return fmt.Errorf("invalid deployment template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+@@ -225,7 +225,7 @@ func (wh *Webhook) send(ctx context.Context, data []byte) error {
+ 	if resp.StatusCode >= http.StatusBadRequest {
+ 		body, err := io.ReadAll(resp.Body)
+ 		if err != nil {
+-			return fmt.Errorf("response status: %s", resp.Status)
++			return fmt.Errorf("response status: %s, read error: %w", resp.Status, err)
+ 		}
+ 		return fmt.Errorf("%s: %s", resp.Status, string(body))
+ 	}
+diff --git a/prom/clickhouse.go b/prom/clickhouse.go
+index 394eb3f..4866665 100644
+--- a/prom/clickhouse.go
++++ b/prom/clickhouse.go
+@@ -212,7 +212,7 @@ func (c *ClickHouse) LabelValues(r *http.Request, w http.ResponseWriter, labelNa
+ 
+ 	matcherSets, err := parser.ParseMetricSelectors(r.Form["match[]"])
+ 	if err != nil {
+-		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %s", r.Form["match[]"]), errorBadData, nil)
++		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %w", err), errorBadData, nil)
+ 		return
+ 	}
+ 	q, _ := c.Querier(timestamp.FromTime(now.Add(-time.Hour)), timestamp.FromTime(now))
+@@ -268,7 +268,7 @@ func (c *ClickHouse) Series(r *http.Request, w http.ResponseWriter) {
+ 	}
+ 	matcherSets, err := parser.ParseMetricSelectors(r.Form["match[]"])
+ 	if err != nil {
+-		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %s", r.Form["match[]"]), errorBadData, nil)
++		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %w", err), errorBadData, nil)
+ 		return
+ 	}
+ 	q, _ := c.Querier(timestamp.FromTime(now.Add(-time.Hour)), timestamp.FromTime(now))
+@@ -298,7 +298,7 @@ func (c *ClickHouse) Series(r *http.Request, w http.ResponseWriter) {
+ 		metrics = append(metrics, set.At().Labels())
+ 	}
+ 	if set.Err() != nil {
+-		writePrometheusResponse(w, err, errorExec, nil)
++		writePrometheusResponse(w, set.Err(), errorExec, nil)
+ 		return
+ 	}
+ 	writePrometheusResponse(w, nil, errorNone, metrics)
+diff --git a/prom/http.go b/prom/http.go
+index 081d3ff..5faf37e 100644
+--- a/prom/http.go
++++ b/prom/http.go
+@@ -79,7 +79,7 @@ func (c *HttpClient) QueryRange(ctx context.Context, query string, filterLabels
+ 		}
+ 		_ = json.Unmarshal(d, &j)
+ 		if j.Error != "" {
+-			return nil, fmt.Errorf("%s", j.Error)
++			return nil, errors.New(j.Error)
+ 		}
+ 		return nil, errors.New(resp.Status)
+ 	}
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..3448301 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -325,14 +325,6 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step
+ 			}
+ 		}
+ 	}
+-	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
+-	if totalMem := memUsage.Get(); !totalMem.IsEmpty() {
+-		s := totalMem.Reduce(timeseries.NanSum)
+-		c := totalMem.Map(timeseries.Defined).Reduce(timeseries.NanSum)
+-		if c > 0 && s > 0 {
+-			ms.MemoryUsage = int64(s / c)
+-		}
+-	}
+ 	ms.OOMKills = int64(sum(oomKills.Get(), from, to))
+ 	ms.Restarts = int64(sum(restarts.Get(), from, to))
+ 	ms.LogErrors = int64(sum(logErrors.Get(), from, to))

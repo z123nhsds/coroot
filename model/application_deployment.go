@@ -32,25 +32,6 @@ const (
 	ApplicationDeploymentStateSummary
 )
 
-type ApplicationDeployment struct {
-	ApplicationId ApplicationId
-	Name          string
-	StartedAt     timeseries.Time
-	FinishedAt    timeseries.Time
-
-	Details *ApplicationDeploymentDetails
-
-	MetricsSnapshot *MetricsSnapshot
-
-	Notifications *ApplicationDeploymentNotifications
-}
-
-func (d *ApplicationDeployment) Hash() string {
-	return utils.LastPart(d.Name, "-")
-}
-
-func (d *ApplicationDeployment) Id() string {
-	return d.Hash() + ":" + strconv.FormatInt(int64(d.StartedAt), 10)
 }
 
 func (d *ApplicationDeployment) Version() string {
@@ -96,14 +77,13 @@ type ApplicationDeploymentNotifications struct {
 	Teams struct {
 		State ApplicationDeploymentState `json:"state"`
 	} `json:"teams"`
-	Webhook struct {
-		State ApplicationDeploymentState `json:"state"`
-	} `json:"webhook"`
-}
-
-type ApplicationDeploymentSummary struct {
-	Report  AuditReportName `json:"report"`
-	Ok      bool            `json:"ok"`
+	Restarts          int64   `json:"restarts"`
+	CPUUsage          float32 `json:"cpu_usage"`
+	MemoryLeakPercent float32 `json:"memory_leak_percent"`
+	MemoryUsage       int64   `json:"memory_usage"`
+	OOMKills          int64   `json:"oom_kills"`
+	LogErrors         int64   `json:"log_errors"`
+	LogWarnings       int64   `json:"log_warnings"`
 	Message string          `json:"message"`
 	Time    timeseries.Time `json:"time"`
 }
@@ -287,22 +267,9 @@ func CalcApplicationDeploymentSummary(app *Application, checkConfigs CheckConfig
 			} else {
 				perRequestCurr := float32(curr.LogErrors) / float32(curr.Requests)
 				perRequestPrev := float32(prev.LogErrors) / float32(prev.Requests)
-				diff := (perRequestCurr - perRequestPrev) * 100 / perRequestPrev
-				if float32(math.Abs(float64(diff))) > significantPercentageDifference {
-					ok := false
-					verb := "increased"
-					if diff < 0 {
-						ok = true
-						verb = "decreased"
-					}
-					add(AuditReportLogs, ok, "Logs: the number of errors in the logs has %s by %d%%", verb, int(math.Abs(float64(diff))))
-				}
+		add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour)", curr.MemoryLeakPercent)
 			}
-		}
-	}
-
-	for i := range res {
-		res[i].Time = t
+		add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed")
 	}
 	return res, status
 }

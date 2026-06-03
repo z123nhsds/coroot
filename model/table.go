@@ -177,10 +177,6 @@ func (c *TableCell) AddTag(format string, a ...any) *TableCell {
 	} else {
 		c.Tags = append(c.Tags, fmt.Sprintf(format, a...))
 	}
-	return c
-}
-
-func (c *TableCell) SetProgress(percent int, color string) *TableCell {
 	if c == nil {
 		return nil
 	}
@@ -200,16 +196,7 @@ func (c *TableCell) SetStub(format string, a ...any) *TableCell {
 	if c == nil {
 		return nil
 	}
-	c.Value = fmt.Sprintf(format, a...)
-	c.IsStub = true
-	return c
-}
-
-func (c *TableCell) SetMaxWidth(w int) *TableCell {
-	if c == nil {
-		return nil
-	}
-	c.MaxWidth = w
+func (c *TableCell) SetStub(format string, a ...any) *TableCell {
 	return c
 }
 

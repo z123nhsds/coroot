@@ -212,7 +212,7 @@ func (c *ClickHouse) LabelValues(r *http.Request, w http.ResponseWriter, labelNa
 
 	matcherSets, err := parser.ParseMetricSelectors(r.Form["match[]"])
 	if err != nil {
-		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %s", r.Form["match[]"]), errorBadData, nil)
+		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %w", err), errorBadData, nil)
 		return
 	}
 	q, _ := c.Querier(timestamp.FromTime(now.Add(-time.Hour)), timestamp.FromTime(now))
@@ -268,7 +268,7 @@ func (c *ClickHouse) Series(r *http.Request, w http.ResponseWriter) {
 	}
 	matcherSets, err := parser.ParseMetricSelectors(r.Form["match[]"])
 	if err != nil {
-		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %s", r.Form["match[]"]), errorBadData, nil)
+		writePrometheusResponse(w, fmt.Errorf("invalid matchers: %w", err), errorBadData, nil)
 		return
 	}
 	q, _ := c.Querier(timestamp.FromTime(now.Add(-time.Hour)), timestamp.FromTime(now))
@@ -298,7 +298,7 @@ func (c *ClickHouse) Series(r *http.Request, w http.ResponseWriter) {
 		metrics = append(metrics, set.At().Labels())
 	}
 	if set.Err() != nil {
-		writePrometheusResponse(w, err, errorExec, nil)
+		writePrometheusResponse(w, set.Err(), errorExec, nil)
 		return
 	}
 	writePrometheusResponse(w, nil, errorNone, metrics)

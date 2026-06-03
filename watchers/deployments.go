@@ -325,14 +325,6 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step 
 			}
 		}
 	}
-	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
-	if totalMem := memUsage.Get(); !totalMem.IsEmpty() {
-		s := totalMem.Reduce(timeseries.NanSum)
-		c := totalMem.Map(timeseries.Defined).Reduce(timeseries.NanSum)
-		if c > 0 && s > 0 {
-			ms.MemoryUsage = int64(s / c)
-		}
-	}
 	ms.OOMKills = int64(sum(oomKills.Get(), from, to))
 	ms.Restarts = int64(sum(restarts.Get(), from, to))
 	ms.LogErrors = int64(sum(logErrors.Get(), from, to))

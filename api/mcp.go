@@ -366,21 +366,6 @@ func (h *MCPHandler) registerTools() {
 		),
 		h.toolQueryLogs,
 	)
-}
-
-func (h *MCPHandler) toolListProjects(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	user := mcpUserFromContext(ctx)
-	if user == nil {
-		return mcp.NewToolResultError("unauthorized"), nil
-	}
-	names, err := h.Api.db.GetProjectNames()
-	if err != nil {
-		klog.Errorln("mcp: list_projects:", err)
-		return mcp.NewToolResultError("failed to load projects"), nil
-	}
-	out := map[string]string{}
-	for id, name := range names {
-		if !h.Api.IsAllowed(user, rbac.Actions.Project(string(id)).List()...) {
 			continue
 		}
 		out[name] = string(id)

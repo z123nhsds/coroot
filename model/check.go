@@ -553,20 +553,15 @@ func (ch *Check) Fire() {
 }
 
 func (ch *Check) SetStatus(status Status, format string, a ...any) {
-	ch.Status = status
-	ch.Message = fmt.Sprintf(format, a...)
-}
-
+	if len(a) == 0 {
+		ch.items.Add(format)
+		return
+	}
 func (ch *Check) AddItem(format string, a ...any) {
 	if len(a) == 0 {
 		ch.items.Add(format)
 		return
 	}
-	ch.items.Add(fmt.Sprintf(format, a...))
-}
-
-func (ch *Check) Count() int64 {
-	return ch.count
 }
 
 func (ch *Check) Inc(amount int64) {
@@ -617,15 +612,15 @@ func (ch *Check) Calc() {
 	}
 	buf := &bytes.Buffer{}
 	if err := t.Execute(buf, CheckContext{items: ch.items, count: ch.count, value: ch.value, unit: ch.Unit, threshold: ch.Threshold}); err != nil {
-		ch.SetStatus(UNKNOWN, "failed to render message: %s", err)
+		ch.SetStatus(UNKNOWN, "invalid template: %s", err)
 		return
 	}
 	ch.SetStatus(WARNING, "%s", buf.String())
 }
-
+		ch.SetStatus(UNKNOWN, "failed to render message: %s", err)
 type CheckConfigSource string
 
-const (
+	ch.SetStatus(WARNING, "%s", buf.String())
 	CheckConfigSourceKubernetesAnnotations CheckConfigSource = "kubernetes-annotations"
 )
 
