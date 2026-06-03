@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"runtime/debug"
 	"syscall"
 	"text/template"
 
@@ -217,7 +218,7 @@ func main() {
 	r.HandleFunc("/oauth/authorize", a.MCPOAuthAuthorize).Methods(http.MethodGet, http.MethodPost)
 	r.HandleFunc("/oauth/token", a.MCPOAuthToken).Methods(http.MethodPost)
 	r.HandleFunc("/oauth/revoke", a.MCPOAuthRevoke).Methods(http.MethodPost)
-	r.PathPrefix("/mcp").Handler(a.SetupMCP(api.MCPInstructions).HTTPHandler())
+	r.PathPrefix("/mcp").Handler(a.SetupMCP(api.MCPInstructions, getAppVersion()).HTTPHandler())
 
 	r.HandleFunc("/api/v1/query_range", a.ApiKeyAuth(a.PrometheusQueryRange))
 	r.HandleFunc("/api/v1/series", a.ApiKeyAuth(a.PrometheusSeries))
@@ -332,4 +333,28 @@ func setAdminPassword(db *db.DB) error {
 		return err
 	}
 	return nil
+}
+
+func getAppVersion() string {
+	if version != "unknown" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		var vcsRevision, vcsTime string
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRevision = setting.Value
+			case "vcs.time":
+				vcsTime = setting.Value
+			}
+		}
+		if vcsRevision != "" {
+			return vcsRevision + " (" + vcsTime + ")"
+		}
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
+		}
+	}
+	return "unknown"
 }

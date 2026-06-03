@@ -58,12 +58,12 @@ type MCPHandler struct {
 	sessions sync.Map // sessionID -> *mcpSessionState
 }
 
-func (api *Api) SetupMCP(instructions string) *MCPHandler {
+func (api *Api) SetupMCP(instructions, version string) *MCPHandler {
 	h := &MCPHandler{
 		Api: api,
 		Server: mcpserver.NewMCPServer(
 			"coroot",
-			"1.0.0",
+			version,
 			mcpserver.WithToolCapabilities(false),
 			mcpserver.WithInstructions(instructions),
 		),

@@ -1,0 +1,184 @@
+diff --git a/api/mcp.go b/api/mcp.go
+index f7b4344..6459c3a 100644
+--- a/api/mcp.go
++++ b/api/mcp.go
+@@ -58,12 +58,12 @@ type MCPHandler struct {
+ 	sessions sync.Map // sessionID -> *mcpSessionState
+ }
+ 
+-func (api *Api) SetupMCP(instructions string) *MCPHandler {
++func (api *Api) SetupMCP(instructions, version string) *MCPHandler {
+ 	h := &MCPHandler{
+ 		Api: api,
+ 		Server: mcpserver.NewMCPServer(
+ 			"coroot",
+-			"1.0.0",
++			version,
+ 			mcpserver.WithToolCapabilities(false),
+ 			mcpserver.WithInstructions(instructions),
+ 		),
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..58733db 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -3,7 +3,7 @@ package auditor
+ import (
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+-	"gonum.org/v1/gonum/stat"
++	"github.com/coroot/coroot/utils/math"
+ )
+ 
+ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+@@ -129,7 +129,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 		for container, byInstance := range rssByContainer {
+ 			limit := limitByContainer[container].Get().Reduce(timeseries.Max)
+ 			for _, rss := range byInstance {
+-				if pct := MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
++				if pct := math.MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
+ 					maxPct = pct
+ 				}
+ 			}
+@@ -155,71 +155,3 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 		return
+ 	}
+ }
+-
+-func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+-	if rss.IsEmpty() {
+-		return 0
+-	}
+-	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
+-		return 0
+-	}
+-	var x, y []float64
+-	var cx, cy []float64
+-	var prev = timeseries.NaN
+-	iter := rss.Iter()
+-	for iter.Next() {
+-		t, v := iter.Value()
+-		if timeseries.IsNaN(v) {
+-			continue
+-		}
+-		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
+-			if len(cx) > len(x) {
+-				x, y = cx, cy
+-			}
+-			cx, cy = nil, nil
+-		}
+-		cx = append(cx, float64(t))
+-		cy = append(cy, float64(v))
+-		prev = v
+-	}
+-	if len(cx) > len(x) {
+-		x, y = cx, cy
+-	}
+-	if len(x) < 10 || len(x) < rss.Len()/3 {
+-		return 0
+-	}
+-
+-	alpha, beta := stat.LinearRegression(x, y, nil, false)
+-	if beta <= 0 {
+-		return 0
+-	}
+-
+-	tailStart := len(x) - len(x)/4
+-	for tailStart > 0 && x[len(x)-1]-x[tailStart] < float64(15*timeseries.Minute) {
+-		tailStart--
+-	}
+-	if len(x)-tailStart < 5 {
+-		return 0
+-	}
+-	_, tailBeta := stat.LinearRegression(x[tailStart:], y[tailStart:], nil, false)
+-	if tailBeta <= 0 || tailBeta < beta*0.3 {
+-		return 0
+-	}
+-
+-	s := float32(alpha + beta*float64(to.Add(-timeseries.Hour)))
+-	e := float32(alpha + beta*float64(to))
+-	if !(e > 0 && e > s) {
+-		return 0
+-	}
+-	var minGrowth float32 = 50 * 1024 * 1024
+-	if !timeseries.IsNaN(limit) && limit > 0 {
+-		minGrowth = limit * 0.05
+-	}
+-	if (e - s) < minGrowth {
+-		return 0
+-	}
+-	if s > 0 {
+-		return (e - s) / s * 100
+-	}
+-	return (e - s) / e * 100
+-}
+diff --git a/main.go b/main.go
+index 7fe206d..c1fda68 100644
+--- a/main.go
++++ b/main.go
+@@ -9,6 +9,7 @@ import (
+ 	"os"
+ 	"os/signal"
+ 	"path"
++	"runtime/debug"
+ 	"syscall"
+ 	"text/template"
+ 
+@@ -217,7 +218,7 @@ func main() {
+ 	r.HandleFunc("/oauth/authorize", a.MCPOAuthAuthorize).Methods(http.MethodGet, http.MethodPost)
+ 	r.HandleFunc("/oauth/token", a.MCPOAuthToken).Methods(http.MethodPost)
+ 	r.HandleFunc("/oauth/revoke", a.MCPOAuthRevoke).Methods(http.MethodPost)
+-	r.PathPrefix("/mcp").Handler(a.SetupMCP(api.MCPInstructions).HTTPHandler())
++	r.PathPrefix("/mcp").Handler(a.SetupMCP(api.MCPInstructions, getAppVersion()).HTTPHandler())
+ 
+ 	r.HandleFunc("/api/v1/query_range", a.ApiKeyAuth(a.PrometheusQueryRange))
+ 	r.HandleFunc("/api/v1/series", a.ApiKeyAuth(a.PrometheusSeries))
+@@ -333,3 +334,27 @@ func setAdminPassword(db *db.DB) error {
+ 	}
+ 	return nil
+ }
++
++func getAppVersion() string {
++	if version != "unknown" {
++		return version
++	}
++	if info, ok := debug.ReadBuildInfo(); ok {
++		var vcsRevision, vcsTime string
++		for _, setting := range info.Settings {
++			switch setting.Key {
++			case "vcs.revision":
++				vcsRevision = setting.Value
++			case "vcs.time":
++				vcsTime = setting.Value
++			}
++		}
++		if vcsRevision != "" {
++			return vcsRevision + " (" + vcsTime + ")"
++		}
++		if info.Main.Version != "" && info.Main.Version != "(devel)" {
++			return info.Main.Version
++		}
++	}
++	return "unknown"
++}
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..d6df53a 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -7,7 +7,7 @@ import (
+ 	"sort"
+ 	"time"
+ 
+-	"github.com/coroot/coroot/auditor"
++	"github.com/coroot/coroot/utils/math"
+ 	cloud_pricing "github.com/coroot/coroot/cloud-pricing"
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+@@ -320,7 +320,7 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step
+ 			memUsage.Add(c.MemoryRss)
+ 			restarts.Add(c.Restarts)
+ 			oomKills.Add(c.OOMKills)
+-			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
++			if pct := math.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
+ 				ms.MemoryLeakPercent = pct
+ 			}
+ 		}
