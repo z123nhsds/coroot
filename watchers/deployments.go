@@ -323,7 +323,6 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step 
 			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
 				ms.MemoryLeakPercent = pct
 			}
-		}
 	}
 	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
 	if totalMem := memUsage.Get(); !totalMem.IsEmpty() {

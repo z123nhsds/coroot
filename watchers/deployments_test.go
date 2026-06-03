@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/timeseries"
 	"github.com/stretchr/testify/assert"
 )

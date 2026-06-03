@@ -1,0 +1,173 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index f0e2ca6..fdf631f 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -35,13 +35,6 @@ jobs:
+   build-images:
+     needs: build-frontend
+     runs-on: ubuntu-22.04
+-    steps:
+-      - uses: actions/checkout@v5
+-
+-      - uses: actions/download-artifact@v4
+-
+-      - uses: docker/setup-qemu-action@v3
+-      - uses: docker/setup-buildx-action@v3
+ 
+       - uses: docker/metadata-action@v5
+         id: meta
+@@ -65,12 +58,7 @@ jobs:
+           push: true
+           tags: ${{ steps.meta.outputs.tags }}
+           labels: ${{ steps.meta.outputs.labels }}
+-          build-args: |
+-            VERSION=${{ steps.meta.outputs.version }}
+-            
+-      - name: extract amd64 binary from the image
+         run: |
+-          docker create --platform linux/amd64 --name amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} && 
+           docker cp amd64:/usr/bin/coroot /tmp/coroot-amd64
+ 
+       - name: extract arm64 binary from the image
+@@ -79,21 +67,17 @@ jobs:
+           docker cp arm64:/usr/bin/coroot /tmp/coroot-arm64
+ 
+       - name: upload amd64 binary
+-        uses: actions/upload-release-asset@v1
++            
+         env:
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+-        with:
++          docker create --platform linux/amd64 --name amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} && 
+           upload_url: ${{ github.event.release.upload_url }}
+           asset_path: /tmp/coroot-amd64
+           asset_name: coroot-amd64
+           asset_content_type: application/octet-stream
+-
++          docker create --platform linux/arm64 --name arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} &&
+       - name: upload arm64 binary
+         uses: actions/upload-release-asset@v1
+-        env:
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+-        with:
+-          upload_url: ${{ github.event.release.upload_url }}
+           asset_path: /tmp/coroot-arm64
+           asset_name: coroot-arm64
+           asset_content_type: application/octet-stream
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..9e7d45c 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -43,6 +43,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 	seenContainers := false
+ 	limitByContainer := map[string]*timeseries.Aggregate{}
+ 	rssByContainer := map[string]map[string]*timeseries.TimeSeries{}
++	rssByContainer := map[string]map[string]*timeseries.TimeSeries{}
+ 	periodicJob := a.app.PeriodicJob()
+ 	for _, i := range a.app.Instances {
+ 		oom := timeseries.NewAggregate(timeseries.NanSum)
+@@ -56,6 +57,10 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 			if limitByContainer[c.Name] == nil {
+ 				limitByContainer[c.Name] = timeseries.NewAggregate(timeseries.Max)
+ 			}
++			if rssByContainer[c.Name] == nil {
++				rssByContainer[c.Name] = map[string]*timeseries.TimeSeries{}
++			}
++			rssByContainer[c.Name][i.Name] = c.MemoryRss
+ 			limitByContainer[c.Name].Add(c.MemoryLimit)
+ 			if rssByContainer[c.Name] == nil {
+ 				rssByContainer[c.Name] = map[string]*timeseries.TimeSeries{}
+@@ -70,7 +75,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 			pressureSome.Add(c.MemoryPressureSome)
+ 			pressureFull.Add(c.MemoryPressureFull)
+ 			if v := c.MemoryPressureSome.Last(); v > pressureCheck.Threshold {
+-				pressureCheck.AddItem("%s", i.Name)
++				pressureCheck.AddItem(i.Name)
+ 			}
+ 		}
+ 		if pressureChart != nil {
+@@ -119,8 +124,19 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 	if usageChart != nil {
+ 		for container, limit := range limitByContainer {
+ 			usageChart.GetOrCreateChart("RSS container: "+container).SetThreshold("limit", limit.Get()).Feature()
++	} else {
++		var maxPct float32
++		for container, byInstance := range rssByContainer {
++			limit := limitByContainer[container].Get().Reduce(timeseries.Max)
++			for _, rss := range byInstance {
++				if pct := MemoryGrowthPct(rss, limit, a.w.Ctx.To); pct > maxPct {
++					maxPct = pct
++				}
++			}
++		}
++		if maxPct > 0 {
++			leakCheck.SetValue(maxPct)
+ 		}
+-	}
+ 
+ 	if periodicJob {
+ 		leakCheck.SetStatus(model.UNKNOWN, "not checked for periodic jobs")
+@@ -138,39 +154,6 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 			leakCheck.SetValue(maxPct)
+ 		}
+ 	}
+-
+-	if usageChart != nil {
+-		for _, ch := range usageChart.Charts {
+-			ch.DrillDownLink = model.NewRouterLink("profile", "overview").
+-				SetParam("view", "applications").
+-				SetParam("id", a.app.Id).
+-				SetParam("report", model.AuditReportProfiling).
+-				SetArg("query", model.ProfileCategoryMemory)
+-		}
+-	}
+-	if !seenContainers {
+-		oomCheck.SetStatus(model.UNKNOWN, "no data")
+-		leakCheck.SetStatus(model.UNKNOWN, "no data")
+-		pressureCheck.SetStatus(model.UNKNOWN, "no data")
+-		return
+-	}
+-}
+-
+-func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+-	if rss.IsEmpty() {
+-		return 0
+-	}
+-	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
+-		return 0
+-	}
+-	var x, y []float64
+-	var cx, cy []float64
+-	var prev = timeseries.NaN
+-	iter := rss.Iter()
+-	for iter.Next() {
+-		t, v := iter.Value()
+-		if timeseries.IsNaN(v) {
+-			continue
+ 		}
+ 		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
+ 			if len(cx) > len(x) {
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..af8d612 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -323,7 +323,6 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step
+ 			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
+ 				ms.MemoryLeakPercent = pct
+ 			}
+-		}
+ 	}
+ 	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
+ 	if totalMem := memUsage.Get(); !totalMem.IsEmpty() {
+diff --git a/watchers/deployments_test.go b/watchers/deployments_test.go
+index 63ce0e3..fa3fa8e 100644
+--- a/watchers/deployments_test.go
++++ b/watchers/deployments_test.go
+@@ -5,7 +5,6 @@ import (
+ 	"strings"
+ 	"testing"
+ 
+-	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+ 	"github.com/stretchr/testify/assert"
+ )
