@@ -84,13 +84,6 @@ type Stats struct {
 		ApiCalls          map[string]int             `json:"api_calls"`
 		McpCalls          map[string]int             `json:"mcp_calls"`
 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
-	} `json:"ux"`
-	Performance struct {
-		Constructor constructor.Profile `json:"constructor"`
-		Auditor     auditor.Profile     `json:"auditor"`
-		Components  []*Component        `json:"components"`
-	} `json:"performance"`
-	Profile struct {
 		From   int64  `json:"from"`
 		To     int64  `json:"to"`
 		CPU    string `json:"cpu"`
@@ -171,23 +164,9 @@ func NewCollector(disabled bool, instanceUuid, version string, edition string, d
 	c := &Collector{
 		db:      db,
 		cache:   cache,
-		pricing: pricing,
+}
 
-		client: &http.Client{Timeout: sendTimeout},
-
-		instanceUuid:     instanceUuid,
-		instanceVersion:  version,
-		edition:          edition,
-		installationType: os.Getenv("INSTALLATION_TYPE"),
-
-		usersByScreenSize: map[string]*utils.StringSet{},
-		usersByTheme:      map[string]*utils.StringSet{},
-		pageViews:         map[string]int{},
-		apiCalls:          map[string]int{},
-		mcpCalls:          map[string]int{},
-
-		heapProfiler: godeltaprof.NewHeapProfiler(),
-
+func NewCollector(disabled bool, instanceUuid, version string, edition string, db *db.DB, cache *cache.Cache, pricing *cloud_pricing.Manager, globalClickHouse *db.IntegrationClickhouse) *Collector {
 		globalClickHouse: globalClickHouse,
 
 		disabled: disabled,
@@ -211,8 +190,6 @@ func NewCollector(disabled bool, instanceUuid, version string, edition string, d
 }
 
 type Event struct {
-	Type       string `json:"type"`
-	DeviceId   string `json:"device_id"`
 	DeviceSize string `json:"device_size"`
 	Path       string `json:"path"`
 	Theme      string `json:"theme"`
@@ -535,22 +512,6 @@ func corootComponents(components []*model.Application) []*Component {
 	for _, a := range components {
 		aa := &Component{Id: a.Id}
 		res = append(res, aa)
-		for _, i := range a.Instances {
-			if i.IsObsolete() {
-				continue
-			}
-			ii := &Instance{Containers: map[string]*Container{}}
-			aa.Instances = append(aa.Instances, ii)
-			for _, c := range i.Containers {
-				if c.InitContainer {
-					continue
-				}
-				cc := &Container{}
-				ii.Containers[c.Name] = cc
-				cc.CpuLimit = timeseries.Value(c.CpuLimit.Last())
-				cc.CpuUsage = timeseries.Value(c.CpuUsage.Last())
-				cc.CpuDelay = timeseries.Value(c.CpuDelay.Last())
-				cc.CpuThrottling = timeseries.Value(c.ThrottledTime.Last())
 				cc.MemoryLimit = timeseries.Value(c.MemoryLimit.Last())
 				cc.MemoryUsage = timeseries.Value(c.MemoryRss.Last())
 				cc.MemoryOOMs = timeseries.Value(c.OOMKills.Reduce(timeseries.NanSum))

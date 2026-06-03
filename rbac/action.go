@@ -8,7 +8,6 @@ const (
 	ActionAll  Verb = "*"
 	ActionView Verb = "view"
 	ActionEdit Verb = "edit"
-
 	ScopeAll                          Scope = "*"
 	ScopeSettings                     Scope = "settings"
 	ScopeUsers                        Scope = "users"
@@ -32,7 +31,6 @@ const (
 	ScopeDashboards                   Scope = "project.dashboards"
 	ScopeDashboard                    Scope = "project.dashboard"
 	ScopeProjectAlertingRules         Scope = "project.alerting_rules"
-	ScopeProjectAlerts                Scope = "project.alerts"
 )
 
 type Action struct {

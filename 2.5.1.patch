@@ -1,0 +1,165 @@
+diff --git a/api/views/views.go b/api/views/views.go
+index ad22e6e..bae1a0b 100644
+--- a/api/views/views.go
++++ b/api/views/views.go
+@@ -11,7 +11,6 @@ import (
+ 	"github.com/coroot/coroot/api/views/dashboards"
+ 	"github.com/coroot/coroot/api/views/incident"
+ 	"github.com/coroot/coroot/api/views/inspections"
+-	"github.com/coroot/coroot/api/views/logs"
+ 	"github.com/coroot/coroot/api/views/overview"
+ 	"github.com/coroot/coroot/api/views/profiling"
+ 	"github.com/coroot/coroot/api/views/roles"
+@@ -22,7 +21,6 @@ import (
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/rbac"
+ )
+-
+ func Overview(ctx context.Context, chs clickhouse.Clients, p *db.Project, w *model.World, view, query string) *overview.Overview {
+ 	return overview.Render(ctx, chs, p, w, view, query)
+ }
+@@ -83,6 +81,3 @@ func User(u *db.User, projects map[db.ProjectId]string, viewonly bool) *users.Us
+ 	return users.RenderUser(u, projects, viewonly)
+ }
+ 
+-var (
+-	Dashboards = &dashboards.Dashboards{}
+-)
+diff --git a/rbac/action.go b/rbac/action.go
+index 3d98f72..c971773 100644
+--- a/rbac/action.go
++++ b/rbac/action.go
+@@ -8,7 +8,6 @@ const (
+ 	ActionAll  Verb = "*"
+ 	ActionView Verb = "view"
+ 	ActionEdit Verb = "edit"
+-
+ 	ScopeAll                          Scope = "*"
+ 	ScopeSettings                     Scope = "settings"
+ 	ScopeUsers                        Scope = "users"
+@@ -32,7 +31,6 @@ const (
+ 	ScopeDashboards                   Scope = "project.dashboards"
+ 	ScopeDashboard                    Scope = "project.dashboard"
+ 	ScopeProjectAlertingRules         Scope = "project.alerting_rules"
+-	ScopeProjectAlerts                Scope = "project.alerts"
+ )
+ 
+ type Action struct {
+diff --git a/rbac/actions.go b/rbac/actions.go
+index 153b192..bfc1a89 100644
+--- a/rbac/actions.go
++++ b/rbac/actions.go
+@@ -82,8 +82,6 @@ func (as ProjectActionSet) List() []Action {
+ 		as.Dashboard("*").View(),
+ 		as.AlertingRules().View(),
+ 		as.AlertingRules().Edit(),
+-		as.Alerts().View(),
+-		as.Alerts().Edit(),
+ 	}
+ }
+ 
+@@ -159,10 +157,6 @@ func (as ProjectActionSet) AlertingRules() ProjectAction {
+ 	return ProjectAction{project: &as, scope: ScopeProjectAlertingRules}
+ }
+ 
+-func (as ProjectActionSet) Alerts() ProjectAction {
+-	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
+-}
+-
+ type ProjectViewAction struct {
+ 	project *ProjectActionSet
+ 	scope   Scope
+@@ -243,4 +237,3 @@ func (as DashboardActionSet) object() Object {
+ 
+ func (as DashboardActionSet) View() Action {
+ 	return NewAction(ScopeDashboard, ActionView, as.object())
+-}
+diff --git a/rbac/role.go b/rbac/role.go
+index c78f404..7d93cea 100644
+--- a/rbac/role.go
++++ b/rbac/role.go
+@@ -22,8 +22,6 @@ var (
+ 			NewPermission(ScopeProjectCustomCloudPricing, ActionEdit, nil),
+ 			NewPermission(ScopeProjectInspections, ActionEdit, nil),
+ 			NewPermission(ScopeProjectRisks, ActionEdit, nil),
+-			NewPermission(ScopeDashboards, ActionEdit, nil),
+-			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
+ 		),
+ 		NewRole(RoleViewer,
+diff --git a/stats/stats.go b/stats/stats.go
+index c6515f2..c105050 100644
+--- a/stats/stats.go
++++ b/stats/stats.go
+@@ -84,13 +84,6 @@ type Stats struct {
+ 		ApiCalls          map[string]int             `json:"api_calls"`
+ 		McpCalls          map[string]int             `json:"mcp_calls"`
+ 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
+-	} `json:"ux"`
+-	Performance struct {
+-		Constructor constructor.Profile `json:"constructor"`
+-		Auditor     auditor.Profile     `json:"auditor"`
+-		Components  []*Component        `json:"components"`
+-	} `json:"performance"`
+-	Profile struct {
+ 		From   int64  `json:"from"`
+ 		To     int64  `json:"to"`
+ 		CPU    string `json:"cpu"`
+@@ -171,23 +164,9 @@ func NewCollector(disabled bool, instanceUuid, version string, edition string, d
+ 	c := &Collector{
+ 		db:      db,
+ 		cache:   cache,
+-		pricing: pricing,
+-
+-		client: &http.Client{Timeout: sendTimeout},
+-
+-		instanceUuid:     instanceUuid,
+-		instanceVersion:  version,
+-		edition:          edition,
+-		installationType: os.Getenv("INSTALLATION_TYPE"),
+-
+-		usersByScreenSize: map[string]*utils.StringSet{},
+-		usersByTheme:      map[string]*utils.StringSet{},
+-		pageViews:         map[string]int{},
+-		apiCalls:          map[string]int{},
+-		mcpCalls:          map[string]int{},
+-
+-		heapProfiler: godeltaprof.NewHeapProfiler(),
++}
+ 
++func NewCollector(disabled bool, instanceUuid, version string, edition string, db *db.DB, cache *cache.Cache, pricing *cloud_pricing.Manager, globalClickHouse *db.IntegrationClickhouse) *Collector {
+ 		globalClickHouse: globalClickHouse,
+ 
+ 		disabled: disabled,
+@@ -211,8 +190,6 @@ func NewCollector(disabled bool, instanceUuid, version string, edition string, d
+ }
+ 
+ type Event struct {
+-	Type       string `json:"type"`
+-	DeviceId   string `json:"device_id"`
+ 	DeviceSize string `json:"device_size"`
+ 	Path       string `json:"path"`
+ 	Theme      string `json:"theme"`
+@@ -535,22 +512,6 @@ func corootComponents(components []*model.Application) []*Component {
+ 	for _, a := range components {
+ 		aa := &Component{Id: a.Id}
+ 		res = append(res, aa)
+-		for _, i := range a.Instances {
+-			if i.IsObsolete() {
+-				continue
+-			}
+-			ii := &Instance{Containers: map[string]*Container{}}
+-			aa.Instances = append(aa.Instances, ii)
+-			for _, c := range i.Containers {
+-				if c.InitContainer {
+-					continue
+-				}
+-				cc := &Container{}
+-				ii.Containers[c.Name] = cc
+-				cc.CpuLimit = timeseries.Value(c.CpuLimit.Last())
+-				cc.CpuUsage = timeseries.Value(c.CpuUsage.Last())
+-				cc.CpuDelay = timeseries.Value(c.CpuDelay.Last())
+-				cc.CpuThrottling = timeseries.Value(c.ThrottledTime.Last())
+ 				cc.MemoryLimit = timeseries.Value(c.MemoryLimit.Last())
+ 				cc.MemoryUsage = timeseries.Value(c.MemoryRss.Last())
+ 				cc.MemoryOOMs = timeseries.Value(c.OOMKills.Reduce(timeseries.NanSum))

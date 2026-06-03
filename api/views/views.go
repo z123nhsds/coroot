@@ -11,7 +11,6 @@ import (
 	"github.com/coroot/coroot/api/views/dashboards"
 	"github.com/coroot/coroot/api/views/incident"
 	"github.com/coroot/coroot/api/views/inspections"
-	"github.com/coroot/coroot/api/views/logs"
 	"github.com/coroot/coroot/api/views/overview"
 	"github.com/coroot/coroot/api/views/profiling"
 	"github.com/coroot/coroot/api/views/roles"
@@ -22,7 +21,6 @@ import (
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/rbac"
 )
-
 func Overview(ctx context.Context, chs clickhouse.Clients, p *db.Project, w *model.World, view, query string) *overview.Overview {
 	return overview.Render(ctx, chs, p, w, view, query)
 }
@@ -83,6 +81,3 @@ func User(u *db.User, projects map[db.ProjectId]string, viewonly bool) *users.Us
 	return users.RenderUser(u, projects, viewonly)
 }
 
-var (
-	Dashboards = &dashboards.Dashboards{}
-)
