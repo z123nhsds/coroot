@@ -1,0 +1,84 @@
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..d9c7527 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -156,6 +156,8 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 	}
+ }
+ 
++
++
+ func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+ 	if rss.IsEmpty() {
+ 		return 0
+diff --git a/notifications/webhook.go b/notifications/webhook.go
+index 0fe5d99..a1fb772 100644
+--- a/notifications/webhook.go
++++ b/notifications/webhook.go
+@@ -106,7 +106,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
+ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+ 	tmpl, err := template.New("incidentTemplate").Funcs(templateFunctions).Parse(wh.cfg.IncidentTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid incident template: %s", err)
++		return fmt.Errorf("invalid incident template: %w", err)
+ 	}
+ 
+ 	var data bytes.Buffer
+@@ -122,7 +122,7 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
+ 	}
+ 	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid incident template: %s", err)
++		return fmt.Errorf("invalid incident template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+@@ -134,7 +134,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	}
+ 	tmpl, err := template.New("alertTemplate").Funcs(templateFunctions).Parse(wh.cfg.AlertTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid alert template: %s", err)
++		return fmt.Errorf("invalid alert template: %w", err)
+ 	}
+ 
+ 	var data bytes.Buffer
+@@ -154,7 +154,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	}
+ 	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid alert template: %s", err)
++		return fmt.Errorf("invalid alert template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+@@ -163,7 +163,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+ 	tmpl, err := template.New("deploymentTemplate").Funcs(templateFunctions).Parse(wh.cfg.DeploymentTemplate)
+ 	if err != nil {
+-		return fmt.Errorf("invalid deployment template: %s", err)
++		return fmt.Errorf("invalid deployment template: %w", err)
+ 	}
+ 
+ 	status := "Deployed"
+@@ -193,7 +193,7 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
+ 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
+ 	}, wh.cfg.CustomFields))
+ 	if err != nil {
+-		return fmt.Errorf("invalid deployment template: %s", err)
++		return fmt.Errorf("invalid deployment template: %w", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+diff --git a/prom/http.go b/prom/http.go
+index 081d3ff..5faf37e 100644
+--- a/prom/http.go
++++ b/prom/http.go
+@@ -79,7 +79,7 @@ func (c *HttpClient) QueryRange(ctx context.Context, query string, filterLabels
+ 		}
+ 		_ = json.Unmarshal(d, &j)
+ 		if j.Error != "" {
+-			return nil, fmt.Errorf("%s", j.Error)
++			return nil, errors.New(j.Error)
+ 		}
+ 		return nil, errors.New(resp.Status)
+ 	}

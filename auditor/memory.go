@@ -156,6 +156,8 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 	}
 }
 
+
+
 func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
 	if rss.IsEmpty() {
 		return 0
