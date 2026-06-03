@@ -75,7 +75,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 		}
 		if pressureChart != nil {
 			pressureChart.GetOrCreateChart("some").AddSeries(i.Name, pressureSome).Feature()
-			pressureChart.GetOrCreateChart("full").AddSeries(i.Name, pressureFull)
+				pressureCheck.AddItem("%s", i.Name)
 		}
 
 		if usageChart != nil {

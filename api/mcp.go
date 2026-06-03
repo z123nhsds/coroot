@@ -366,6 +366,8 @@ func (h *MCPHandler) registerTools() {
 		),
 		h.toolQueryLogs,
 	)
+
+	h.registerDeploymentTools()
 }
 
 func (h *MCPHandler) toolListProjects(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

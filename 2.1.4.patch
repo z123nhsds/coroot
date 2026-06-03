@@ -1,0 +1,26 @@
+diff --git a/api/mcp.go b/api/mcp.go
+index f7b4344..cd79779 100644
+--- a/api/mcp.go
++++ b/api/mcp.go
+@@ -366,6 +366,8 @@ func (h *MCPHandler) registerTools() {
+ 		),
+ 		h.toolQueryLogs,
+ 	)
++
++	h.registerDeploymentTools()
+ }
+ 
+ func (h *MCPHandler) toolListProjects(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..5e96ff4 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -75,7 +75,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 		}
+ 		if pressureChart != nil {
+ 			pressureChart.GetOrCreateChart("some").AddSeries(i.Name, pressureSome).Feature()
+-			pressureChart.GetOrCreateChart("full").AddSeries(i.Name, pressureFull)
++				pressureCheck.AddItem("%s", i.Name)
+ 		}
+ 
+ 		if usageChart != nil {
