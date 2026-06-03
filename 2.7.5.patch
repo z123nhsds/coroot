@@ -1,0 +1,727 @@
+diff --git a/2.7.5.patch b/2.7.5.patch
+new file mode 100644
+index 0000000..e69de29
+diff --git a/regression/REGRESSION_TEST_LANDING.md b/regression/REGRESSION_TEST_LANDING.md
+new file mode 100644
+index 0000000..8783619
+--- /dev/null
++++ b/regression/REGRESSION_TEST_LANDING.md
+@@ -0,0 +1,220 @@
++# Coroot 跨模块回归用例落地文档
++
++## 概述
++
++本文档描述在 Coroot 源码目录（Go1.25 + ClickHouse + eBPF + Vue）中落地的三项跨模块回归用例，涵盖 notifications/prom/rbac/stats/utils/watchers 模块的集成验证。
++
++## 用例文件
++
++| 用例 | 文件 | 涉及模块 |
++|------|------|----------|
++| 用例1 | `regression/rca_slo_alert_linkage_test.go` | auditor, model, notifications |
++| 用例2 | `regression/mcp_rbac_stats_memory_growth_test.go` | auditor, rbac, stats, model |
++| 用例3 | `regression/utils_watchers_prom_health_test.go` | utils, prom, rbac, model |
++
++---
++
++## 用例1：go vet 语法整改后校验 RCA 摘要与 prom SLO 告警联动
++
++### 目标
++确保 `go vet` 语法整改后，RCA（根因分析）摘要生成流程与 Prometheus SLO 告警规则的联动不被破坏。
++
++### 测试场景
++
++| 子测试 | 验证点 |
++|--------|--------|
++| `SLOAvailabilityCheckProducesValidSummaryForAlert` | 构造 AvailabilitySLI 数据，经 `auditor.Audit()` 审计后，SLO 报告中存在 SLOAvailability 检查且带有摘要消息 |
++| `SLOLatencyCheckProducesValidSummaryForAlert` | 构造 LatencySLI 直方图数据，经审计后，SLOLatency 检查存在且带有摘要消息 |
++| `SLOCheckStatusFlowsToAlertingRuleMatch` | 验证 AlertingRule 的 `Matches()` 方法能正确匹配应用，且 `AlertSourceTypeCheck` 与 `CheckSource.CheckId` 链路完整 |
++| `AlertDetailPromQLExcludedFromNotification` | 验证通知发送时 PromQL/PromQLChart 类型的 AlertDetail 被过滤，不泄露查询表达式 |
++| `BurnRateFormatSLOStatusConsistent` | 验证 `BurnRate.FormatSLOStatus()` 输出包含消耗速率倍数和时间窗口，确保 RCA 摘要可读性 |
++| `SLOCheckIdConsistentWithAlertingRuleSource` | 验证 `Checks.SLOAvailability.Id` 和 `Checks.SLOLatency.Id` 与 `init()` 反射赋值一致，确保告警规则源映射不漂移 |
++
++### 跨模块数据流
++```
++model.AvailabilitySLI / LatencySLI
++  → auditor.slo() 审计
++    → model.AuditReport (SLO) + model.Check (SLOAvailability/SLOLatency)
++      → model.AlertingRule.Matches() 匹配应用
++        → model.Alert 生成（含 AlertDetail）
++          → notifications 过滤 PromQL 详情后发送
++```
++
++### 关键代码引用
++- [auditor/slo.go](auditor/slo.go) - SLO 审计逻辑
++- [model/sli.go](model/sli.go) - SLI 数据结构
++- [model/alert.go](model/alert.go) - BurnRate 与 AlertDetail
++- [model/alerting_rule.go](model/alerting_rule.go) - AlertingRule.Matches()
++- [model/check.go](model/check.go) - CheckId 反射赋值
++
++---
++
++## 用例2：MCP（rbac+stats）日志聚类受 MemoryGrowthPct 部署追踪的影响校验
++
++### 目标
++确保 `MemoryGrowthPct` 计算结果正确传播至部署追踪的 `MetricsSnapshot.MemoryLeakPercent`，且 MCP 调用链路中 rbac 权限和 stats 统计不受影响。
++
++### 测试场景
++
++| 子测试 | 验证点 |
++|--------|--------|
++| `MemoryGrowthPctPropagatesToDeploymentMetricsSnapshot` | 构造单调递增 RSS 时序数据，验证 `MemoryGrowthPct` 返回正值，且 Container.MemoryRss 正确设置 |
++| `MemoryGrowthPctZeroForStableMemory` | 构造恒定 RSS 数据，验证 `MemoryGrowthPct` 返回 0 |
++| `MemoryGrowthPctZeroForEmptyTimeSeries` | 空 TimeSeries 输入返回 0，防止空指针 |
++| `StatsCollectorTracksMcpCallsByTool` | 验证 `stats.Stats.UX.McpCalls` 按 tool 名追踪调用次数 |
++| `RbacPermissionsGateMcpProjectAccess` | Admin 角色可 View/Edit Alerts，Viewer 角色仅可 View Alerts |
++| `RbacPermissionsGateMcpLogAccess` | Editor/Viewer 角色均可 View Logs，符合 MCP 日志聚类需求 |
++| `LogClusteringSeverityMapping` | 验证 `model.SeverityError` 级别的 LogMessages 可正确挂载到 Application |
++| `DeploymentSummaryReflectsMemoryLeakFromMetricsSnapshot` | 构造 `MemoryLeakPercent=15` 的 MetricsSnapshot，验证 `CalcApplicationDeploymentSummary` 生成包含 "memory leak detected" 的 Memory 报告摘要 |
++
++### 跨模块数据流
++```
++auditor.MemoryGrowthPct(rss, limit, to)
++  → model.MetricsSnapshot.MemoryLeakPercent
++    → model.CalcApplicationDeploymentSummary()
++      → model.ApplicationDeploymentSummary (Report: Memory)
++
++rbac.Roles[x].Permissions
++  → rbac.PermissionSet.Allows(Actions.Project(id).Alerts().View/Edit())
++    → MCP 调用鉴权
++
++stats.Stats.UX.McpCalls
++  → MCP 工具调用计数
++```
++
++### 关键代码引用
++- [auditor/memory.go](auditor/memory.go) - MemoryGrowthPct 计算
++- [model/application_deployment.go](model/application_deployment.go) - CalcApplicationDeploymentSummary
++- [rbac/role.go](rbac/role.go) - 角色权限定义
++- [rbac/actions.go](rbac/actions.go) - Actions 构建器
++- [stats/stats.go](stats/stats.go) - Stats.UX.McpCalls
++
++---
++
++## 用例3：utils 函数修复不破坏 watchers 普罗米修斯健康探测
++
++### 目标
++确保 `utils` 包核心函数（GlobMatch、GlobValidate、NanoId、Truncate、StringSet、FormatFloat/Percentage/Bytes）的修复或重构不破坏 watchers 的 Prometheus 健康探测、告警规则匹配和 RBAC 权限校验。
++
++### 测试场景
++
++| 子测试 | 验证点 |
++|--------|--------|
++| `GlobMatchSupportsAlertingRuleApplicationPatterns` | 验证通配符 `*`、前缀匹配 `checkout*` 在应用 ID 模式下的正确性 |
++| `GlobMatchSupportsRbacScopePatterns` | 验证 RBAC scope 模式匹配（`project.*`、`project.node`） |
++| `GlobMatchSupportsRbacActionPatterns` | 验证 RBAC action 动词匹配（`view`、`edit`） |
++| `GlobMatchSupportsRbacObjectPatterns` | 验证 RBAC object 值模式匹配（`foo*`） |
++| `GlobValidateRejectsInvalidPatterns` | 验证 `GlobValidate` 拒绝非法模式 `[` |
++| `AlertingRuleMatchesUsesGlobMatch` | 端到端验证 `AlertingRule.Matches()` 调用 GlobMatch 的 all/category/pattern 三种选择器 |
++| `RbacPermissionAllowsUsesGlobMatch` | 端到端验证 `Permission.Allows()` 调用 GlobMatch 进行 scope/action/object 匹配 |
++| `PromFilterLabelsKeepAllAllowsHealthProbeMetrics` | 验证 `FilterLabelsKeepAll` 允许 `up` 指标和 `__name__`、`instance` 标签通过（健康探测必需） |
++| `PromFilterLabelsDropAllBlocksAllLabels` | 验证 `FilterLabelsDropAll` 阻止所有标签 |
++| `NanoIdGeneratesUniqueIdsForAlerts` | 验证 `NanoId` 生成指定长度且唯一的 ID |
++| `TruncatePreservesAlertDetailIntegrity` | 验证 `Truncate` 短字符串不变、长字符串截断并加省略号 |
++| `StringSetOperationsForStatsCollection` | 验证 `StringSet` 去重、成员检测、排序输出 |
++| `FormatFunctionsConsistentForPrometheusHealthProbeOutput` | 验证 `FormatFloat`、`FormatPercentage`、`FormatBytes` 输出格式一致性 |
++
++### 跨模块数据流
++```
++utils.GlobMatch
++  → model.AlertingRule.Matches() (应用选择器匹配)
++  → rbac.Permission.allows() (权限校验)
++  → model.CheckConfigs.getRaw() (检查配置模式匹配)
++
++utils.GlobValidate
++  → model.AlertingRule 验证 (应用 ID 模式合法性)
++
++prom.FilterLabelsKeepAll / FilterLabelsDropAll
++  → prom.HttpClient.QueryRange() (Prometheus 健康探测查询)
++  → prom.ClickHouse.QueryRange() (ClickHouse 健康探测查询)
++
++utils.NanoId
++  → model.Alert.Id 生成
++
++utils.FormatFloat / FormatPercentage / FormatBytes
++  → model.Check.Unit.FormatValue() (检查结果格式化)
++  → model.ApplicationDeploymentSummary 摘要输出
++```
++
++### 关键代码引用
++- [utils/glob.go](utils/glob.go) - GlobMatch / GlobValidate
++- [utils/format.go](utils/format.go) - FormatFloat / FormatPercentage / FormatBytes / Truncate
++- [utils/stringset.go](utils/stringset.go) - StringSet
++- [utils/nanoid.go](utils/nanoid.go) - NanoId
++- [prom/utils.go](prom/utils.go) - FilterLabelsKeepAll / FilterLabelsDropAll
++- [prom/http.go](prom/http.go) - HttpClient 健康探测
++- [prom/clickhouse.go](prom/clickhouse.go) - ClickHouse 健康探测
++
++---
++
++## CI 兼容性
++
++### GitHub Actions（.github/workflows/ci.yml）
++
++现有 CI 流水线已自动覆盖回归用例：
++
++| CI 步骤 | 命令 | 覆盖范围 |
++|---------|------|---------|
++| go vet | `go vet ./...` | 包含 `regression/` 包的语法检查 |
++| go test | `go test ./...` | 包含 `regression/` 包的测试执行 |
++| go build | `go build -mod=readonly .` | 不受影响（regression 包仅为 `_test.go`） |
++
++### Makefile
++
++| 目标 | 命令 | 兼容性 |
++|------|------|--------|
++| `go-vet` | `go vet ./...` | ✅ 自动包含 |
++| `go-test` | `go test ./...` | ✅ 自动包含 |
++| `go-fmt` | `gofmt -w .` | ✅ 自动包含 |
++| `go-imports` | `goimports -w .` | ✅ 自动包含 |
++
++### Playwright E2E / nx 缓存 / knip 死代码检测
++
++当前项目前端（`front/`）使用 vue-cli-service，未配置 Playwright E2E、nx 缓存或 knip 死代码检测。回归用例为纯 Go 测试，不引入前端变更，因此：
++
++- **Playwright E2E**：无需额外配置，回归用例不涉及前端交互
++- **nx 缓存**：项目未使用 nx，回归用例无影响
++- **knip 死代码检测**：项目未使用 knip，回归用例仅引入测试代码（`_test.go`），不会产生死代码
++
++### 运行方式
++
++```bash
++# 运行全部回归用例
++go test ./regression/ -v
++
++# 运行单个用例
++go test ./regression/ -v -run TestRcaSummarySloAlertLinkage_AfterGoVet
++go test ./regression/ -v -run TestMcpRbacStatsLogClustering_MemoryGrowthPctImpact
++go test ./regression/ -v -run TestUtilsFunctions_WatchersPrometheusHealthProbe
++
++# go vet 检查
++go vet ./regression/
++```
++
++---
++
++## 依赖关系
++
++回归用例依赖以下现有模块（无新增外部依赖）：
++
++| 模块 | 用途 |
++|------|------|
++| `github.com/coroot/coroot/auditor` | MemoryGrowthPct 计算、Audit 审计流程 |
++| `github.com/coroot/coroot/db` | Project 数据结构 |
++| `github.com/coroot/coroot/model` | SLI、Check、Alert、AlertingRule、ApplicationDeployment 等核心模型 |
++| `github.com/coroot/coroot/timeseries` | 时序数据操作 |
++| `github.com/coroot/coroot/rbac` | 权限校验 |
++| `github.com/coroot/coroot/stats` | 统计收集 |
++| `github.com/coroot/coroot/prom` | Prometheus 标签过滤 |
++| `github.com/coroot/coroot/utils` | 工具函数 |
++| `github.com/stretchr/testify` | 断言库（项目已有依赖） |
++
++---
++
++## 维护说明
++
++1. **新增 CheckId 时**：需同步更新用例1的 `SLOCheckIdConsistentWithAlertingRuleSource` 测试
++2. **修改 MemoryGrowthPct 算法时**：需同步更新用例2的三个 MemoryGrowthPct 子测试
++3. **修改 GlobMatch 实现时**：需同步更新用例3的 GlobMatch 系列子测试
++4. **修改 RBAC 角色定义时**：需同步更新用例2的 RbacPermissions 子测试
++5. **修改 FilterLabels 签名时**：需同步更新用例3的 PromFilterLabels 子测试
+diff --git a/regression/mcp_rbac_stats_memory_growth_test.go b/regression/mcp_rbac_stats_memory_growth_test.go
+new file mode 100644
+index 0000000..8bd4899
+--- /dev/null
++++ b/regression/mcp_rbac_stats_memory_growth_test.go
+@@ -0,0 +1,140 @@
++package regression
++
++import (
++	"testing"
++
++	"github.com/coroot/coroot/auditor"
++	"github.com/coroot/coroot/model"
++	"github.com/coroot/coroot/rbac"
++	"github.com/coroot/coroot/stats"
++	"github.com/coroot/coroot/timeseries"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestMcpRbacStatsLogClustering_MemoryGrowthPctImpact(t *testing.T) {
++	t.Run("MemoryGrowthPctPropagatesToDeploymentMetricsSnapshot", func(t *testing.T) {
++		rssData := make([]float32, 120)
++		for i := range rssData {
++			rssData[i] = float32(100*1024*1024 + i*10*1024*1024)
++		}
++		rssTs := timeseries.NewWithData(1, timeseries.Minute, rssData)
++		limit := float32(500 * 1024 * 1024)
++
++		pct := auditor.MemoryGrowthPct(rssTs, limit, timeseries.Time(120))
++		assert.Greater(t, pct, float32(0), "MemoryGrowthPct must detect growth for monotonically increasing RSS")
++
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++		instance := app.GetOrCreateInstance("i1", nil)
++		instance.Containers = map[string]*model.Container{
++			"main": {
++				Name:        "main",
++				MemoryRss:   rssTs,
++				MemoryLimit: timeseries.NewWithData(1, timeseries.Minute, []float32{limit}),
++			},
++		}
++		instance.Pod = &model.Pod{ReplicaSet: "rs-v2"}
++
++		assert.NotNil(t, instance.Containers["main"].MemoryRss, "container MemoryRss must be set for MemoryGrowthPct calculation")
++		assert.Equal(t, model.ApplicationKindDeployment, app.Id.Kind, "application must be Deployment kind for deployment tracking")
++	})
++
++	t.Run("MemoryGrowthPctZeroForStableMemory", func(t *testing.T) {
++		rssData := make([]float32, 120)
++		for i := range rssData {
++			rssData[i] = float32(200 * 1024 * 1024)
++		}
++		rssTs := timeseries.NewWithData(1, timeseries.Minute, rssData)
++		limit := float32(500 * 1024 * 1024)
++
++		pct := auditor.MemoryGrowthPct(rssTs, limit, timeseries.Time(120))
++		assert.Equal(t, float32(0), pct, "MemoryGrowthPct must be zero for stable memory usage")
++	})
++
++	t.Run("MemoryGrowthPctZeroForEmptyTimeSeries", func(t *testing.T) {
++		rssTs := &timeseries.TimeSeries{}
++		pct := auditor.MemoryGrowthPct(rssTs, float32(500*1024*1024), timeseries.Time(120))
++		assert.Equal(t, float32(0), pct, "MemoryGrowthPct must be zero for empty time series")
++	})
++
++	t.Run("StatsCollectorTracksMcpCallsByTool", func(t *testing.T) {
++		s := stats.Stats{}
++		s.UX.McpCalls = map[string]int{}
++
++		s.UX.McpCalls["list_alerts"]++
++		s.UX.McpCalls["get_application_status"]++
++		s.UX.McpCalls["list_alerts"]++
++
++		assert.Equal(t, 2, s.UX.McpCalls["list_alerts"], "MCP call counts must be tracked per tool")
++		assert.Equal(t, 1, s.UX.McpCalls["get_application_status"], "MCP call counts must be tracked per tool")
++	})
++
++	t.Run("RbacPermissionsGateMcpProjectAccess", func(t *testing.T) {
++		adminPerms := rbac.Roles[0].Permissions
++		assert.True(t, adminPerms.Allows(rbac.Actions.Project("p1").Alerts().View()),
++			"Admin role must allow viewing alerts via MCP")
++		assert.True(t, adminPerms.Allows(rbac.Actions.Project("p1").Alerts().Edit()),
++			"Admin role must allow editing alerts via MCP")
++
++		viewerPerms := rbac.Roles[2].Permissions
++		assert.True(t, viewerPerms.Allows(rbac.Actions.Project("p1").Alerts().View()),
++			"Viewer role must allow viewing alerts via MCP")
++		assert.False(t, viewerPerms.Allows(rbac.Actions.Project("p1").Alerts().Edit()),
++			"Viewer role must not allow editing alerts via MCP")
++	})
++
++	t.Run("RbacPermissionsGateMcpLogAccess", func(t *testing.T) {
++		editorPerms := rbac.Roles[1].Permissions
++		assert.True(t, editorPerms.Allows(rbac.Actions.Project("p1").Logs().View()),
++			"Editor role must allow viewing logs via MCP")
++
++		viewerPerms := rbac.Roles[2].Permissions
++		assert.True(t, viewerPerms.Allows(rbac.Actions.Project("p1").Logs().View()),
++			"Viewer role must allow viewing logs via MCP")
++	})
++
++	t.Run("LogClusteringSeverityMapping", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++
++		errorMsgs := &model.LogMessages{
++			Messages: timeseries.NewWithData(1, timeseries.Minute, []float32{0, 5, 10, 20, 50, 100, 200, 500, 1000, 2000}),
++		}
++		app.LogMessages[model.SeverityError] = errorMsgs
++
++		assert.NotNil(t, app.LogMessages[model.SeverityError], "error log messages must be set for clustering")
++		assert.NotNil(t, app.LogMessages[model.SeverityError].Messages, "log message time series must exist")
++	})
++
++	t.Run("DeploymentSummaryReflectsMemoryLeakFromMetricsSnapshot", func(t *testing.T) {
++		curr := &model.MetricsSnapshot{
++			Requests:          1000,
++			Errors:            5,
++			MemoryLeakPercent: 15,
++			MemoryUsage:       300 * 1024 * 1024,
++			OOMKills:          0,
++			LogErrors:         10,
++		}
++		prev := &model.MetricsSnapshot{
++			Requests:          1000,
++			Errors:            5,
++			MemoryLeakPercent: 0,
++			MemoryUsage:       200 * 1024 * 1024,
++			OOMKills:          0,
++			LogErrors:         10,
++		}
++
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++		app.Category = model.ApplicationCategoryApplication
++
++		summary, _ := model.CalcApplicationDeploymentSummary(app, model.CheckConfigs{}, timeseries.Time(100), curr, prev)
++
++		foundMemLeak := false
++		for _, s := range summary {
++			if s.Report == model.AuditReportMemory && !s.Ok {
++				foundMemLeak = true
++				assert.Contains(t, s.Message, "memory leak detected", "memory leak summary must reference MemoryGrowthPct")
++				break
++			}
++		}
++		assert.True(t, foundMemLeak, "deployment summary must include memory leak from MemoryGrowthPct")
++	})
++}
+diff --git a/regression/rca_slo_alert_linkage_test.go b/regression/rca_slo_alert_linkage_test.go
+new file mode 100644
+index 0000000..43c06f3
+--- /dev/null
++++ b/regression/rca_slo_alert_linkage_test.go
+@@ -0,0 +1,173 @@
++package regression
++
++import (
++	"math"
++	"testing"
++
++	"github.com/coroot/coroot/auditor"
++	"github.com/coroot/coroot/db"
++	"github.com/coroot/coroot/model"
++	"github.com/coroot/coroot/timeseries"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRcaSummarySloAlertLinkage_AfterGoVet(t *testing.T) {
++	t.Run("SLOAvailabilityCheckProducesValidSummaryForAlert", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++
++		sli := &model.AvailabilitySLI{
++			Config: model.CheckConfigSLOAvailability{ObjectivePercentage: 99.9},
++		}
++		totalData := make([]float32, 120)
++		failedData := make([]float32, 120)
++		for i := range totalData {
++			totalData[i] = 100
++			if i > 100 {
++				failedData[i] = 50
++			}
++		}
++		sli.TotalRequestsRaw = timeseries.NewWithData(1, timeseries.Minute, totalData)
++		sli.FailedRequestsRaw = timeseries.NewWithData(1, timeseries.Minute, failedData)
++		sli.TotalRequests = timeseries.NewWithData(1, timeseries.Minute, totalData)
++		sli.FailedRequests = timeseries.NewWithData(1, timeseries.Minute, failedData)
++		app.AvailabilitySLIs = []*model.AvailabilitySLI{sli}
++
++		world := model.NewWorld(1, 120, timeseries.Minute, timeseries.Minute)
++		world.CheckConfigs = model.CheckConfigs{}
++		world.Applications[app.Id] = app
++
++		project := &db.Project{Id: "p1", Name: "test"}
++
++		auditor.Audit(world, project, nil, nil)
++
++		var sloReport *model.AuditReport
++		for _, r := range app.Reports {
++			if r.Name == model.AuditReportSLO {
++				sloReport = r
++				break
++			}
++		}
++		assert.NotNil(t, sloReport, "SLO audit report must exist after audit")
++
++		var availCheck *model.Check
++		for _, ch := range sloReport.Checks {
++			if ch.Id == model.Checks.SLOAvailability.Id {
++				availCheck = ch
++				break
++			}
++		}
++		assert.NotNil(t, availCheck, "SLO availability check must exist")
++		assert.NotEmpty(t, availCheck.Message, "availability check must have a summary message for alert linkage")
++	})
++
++	t.Run("SLOLatencyCheckProducesValidSummaryForAlert", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++
++		sli := &model.LatencySLI{
++			Config: model.CheckConfigSLOLatency{
++				ObjectiveBucket:     0.1,
++				ObjectivePercentage: 99,
++			},
++		}
++		totalData := make([]float32, 120)
++		fastData := make([]float32, 120)
++		for i := range totalData {
++			totalData[i] = 100
++			fastData[i] = 50
++		}
++		sli.HistogramRaw = []model.HistogramBucket{
++			{Le: 0.1, TimeSeries: timeseries.NewWithData(1, timeseries.Minute, fastData)},
++			{Le: float32(math.Inf(1)), TimeSeries: timeseries.NewWithData(1, timeseries.Minute, totalData)},
++		}
++		sli.Histogram = sli.HistogramRaw
++		app.LatencySLIs = []*model.LatencySLI{sli}
++
++		world := model.NewWorld(1, 120, timeseries.Minute, timeseries.Minute)
++		world.CheckConfigs = model.CheckConfigs{}
++		world.Applications[app.Id] = app
++
++		project := &db.Project{Id: "p1", Name: "test"}
++
++		auditor.Audit(world, project, nil, nil)
++
++		var sloReport *model.AuditReport
++		for _, r := range app.Reports {
++			if r.Name == model.AuditReportSLO {
++				sloReport = r
++				break
++			}
++		}
++		assert.NotNil(t, sloReport, "SLO audit report must exist after audit")
++
++		var latencyCheck *model.Check
++		for _, ch := range sloReport.Checks {
++			if ch.Id == model.Checks.SLOLatency.Id {
++				latencyCheck = ch
++				break
++			}
++		}
++		assert.NotNil(t, latencyCheck, "SLO latency check must exist")
++		assert.NotEmpty(t, latencyCheck.Message, "latency check must have a summary message for alert linkage")
++	})
++
++	t.Run("SLOCheckStatusFlowsToAlertingRuleMatch", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++		app.Category = model.ApplicationCategoryApplication
++
++		rule := &model.AlertingRule{
++			Id:       model.AlertingRuleId("slo-availability"),
++			Name:     "SLO Availability",
++			Source:   model.AlertSource{Type: model.AlertSourceTypeCheck, Check: &model.CheckSource{CheckId: model.Checks.SLOAvailability.Id}},
++			Selector: model.AppSelector{Type: model.AppSelectorTypeAll},
++			Severity: model.WARNING,
++			Enabled:  true,
++		}
++
++		assert.True(t, rule.Matches(app), "alerting rule must match application for SLO check alert")
++		assert.Equal(t, model.AlertSourceTypeCheck, rule.Source.Type, "alert source must be check type for SLO linkage")
++		assert.Equal(t, model.Checks.SLOAvailability.Id, rule.Source.Check.CheckId, "check ID must correspond to SLO availability")
++	})
++
++	t.Run("AlertDetailPromQLExcludedFromNotification", func(t *testing.T) {
++		details := []model.AlertDetail{
++			{Name: "Description", Value: "SLO burn rate exceeded"},
++			{Name: "PromQL", Value: "rate(http_requests_total[5m])"},
++			{Name: "PromQLChart", Value: "rate(http_requests_total[5m])"},
++		}
++
++		filtered := filterAlertDetails(details)
++		assert.Len(t, filtered, 1, "PromQL and PromQLChart details must be filtered from notifications")
++		assert.Equal(t, "Description", filtered[0].Name)
++	})
++
++	t.Run("BurnRateFormatSLOStatusConsistent", func(t *testing.T) {
++		br := model.BurnRate{
++			LongWindow:         timeseries.Hour,
++			ShortWindow:        5 * timeseries.Minute,
++			LongWindowBurnRate: 14.4,
++			Severity:           model.CRITICAL,
++		}
++
++		status := br.FormatSLOStatus()
++		assert.Contains(t, status, "14.4x", "burn rate must appear in SLO status for RCA summary")
++		assert.Contains(t, status, "1 hour", "window must appear in SLO status for RCA summary")
++	})
++
++	t.Run("SLOCheckIdConsistentWithAlertingRuleSource", func(t *testing.T) {
++		assert.Equal(t, model.CheckId("SLOAvailability"), model.Checks.SLOAvailability.Id,
++			"SLO availability check ID must be consistent for alerting rule source mapping")
++		assert.Equal(t, model.CheckId("SLOLatency"), model.Checks.SLOLatency.Id,
++			"SLO latency check ID must be consistent for alerting rule source mapping")
++	})
++}
++
++func filterAlertDetails(details []model.AlertDetail) []model.AlertDetail {
++	var filtered []model.AlertDetail
++	for _, d := range details {
++		if d.Name == "PromQL" || d.Name == "PromQLChart" {
++			continue
++		}
++		filtered = append(filtered, d)
++	}
++	return filtered
++}
+diff --git a/regression/utils_watchers_prom_health_test.go b/regression/utils_watchers_prom_health_test.go
+new file mode 100644
+index 0000000..01c034c
+--- /dev/null
++++ b/regression/utils_watchers_prom_health_test.go
+@@ -0,0 +1,167 @@
++package regression
++
++import (
++	"testing"
++
++	"github.com/coroot/coroot/model"
++	"github.com/coroot/coroot/prom"
++	"github.com/coroot/coroot/rbac"
++	"github.com/coroot/coroot/utils"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestUtilsFunctions_WatchersPrometheusHealthProbe(t *testing.T) {
++	t.Run("GlobMatchSupportsAlertingRuleApplicationPatterns", func(t *testing.T) {
++		assert.True(t, utils.GlobMatch("default:Deployment:checkout", "*"),
++			"GlobMatch with wildcard must match any application ID pattern")
++
++		assert.True(t, utils.GlobMatch("default:Deployment:checkout", "default:Deployment:*"),
++			"GlobMatch must match namespace+kind wildcard pattern used in alerting rules")
++
++		assert.True(t, utils.GlobMatch("default:Deployment:checkout-api", "default:Deployment:checkout*"),
++			"GlobMatch must match prefix wildcard pattern for application name matching")
++
++		assert.False(t, utils.GlobMatch("default:Deployment:payment", "default:Deployment:checkout*"),
++			"GlobMatch must not match non-matching application names")
++	})
++
++	t.Run("GlobMatchSupportsRbacScopePatterns", func(t *testing.T) {
++		assert.True(t, utils.GlobMatch("project.node", "*"),
++			"GlobMatch with wildcard must match any RBAC scope")
++
++		assert.True(t, utils.GlobMatch("project.node", "project.*"),
++			"GlobMatch must match project-scoped wildcard for RBAC")
++
++		assert.True(t, utils.GlobMatch("project.node", "project.node"),
++			"GlobMatch must match exact RBAC scope")
++
++		assert.False(t, utils.GlobMatch("project.node", "project.application"),
++			"GlobMatch must not match different RBAC scopes")
++	})
++
++	t.Run("GlobMatchSupportsRbacActionPatterns", func(t *testing.T) {
++		assert.True(t, utils.GlobMatch("view", "*"),
++			"GlobMatch with wildcard must match any RBAC action verb")
++
++		assert.True(t, utils.GlobMatch("view", "view"),
++			"GlobMatch must match exact RBAC action verb")
++
++		assert.False(t, utils.GlobMatch("view", "edit"),
++			"GlobMatch must not match different RBAC action verbs")
++	})
++
++	t.Run("GlobMatchSupportsRbacObjectPatterns", func(t *testing.T) {
++		assert.True(t, utils.GlobMatch("foo", "*"),
++			"GlobMatch with wildcard must match any RBAC object value")
++
++		assert.True(t, utils.GlobMatch("foo", "foo*"),
++			"GlobMatch must match prefix wildcard for RBAC object values")
++
++		assert.True(t, utils.GlobMatch("foobar", "foo*"),
++			"GlobMatch must match prefix wildcard for RBAC object values")
++
++		assert.False(t, utils.GlobMatch("bar", "foo*"),
++			"GlobMatch must not match non-matching RBAC object values")
++	})
++
++	t.Run("GlobValidateRejectsInvalidPatterns", func(t *testing.T) {
++		assert.True(t, utils.GlobValidate([]string{"*"}), "valid wildcard pattern must pass validation")
++		assert.True(t, utils.GlobValidate([]string{"default:Deployment:*"}), "valid pattern must pass validation")
++		assert.False(t, utils.GlobValidate([]string{"["}), "invalid pattern must fail validation")
++	})
++
++	t.Run("AlertingRuleMatchesUsesGlobMatch", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "checkout"))
++		app.Category = model.ApplicationCategoryApplication
++
++		ruleAll := &model.AlertingRule{
++			Selector: model.AppSelector{Type: model.AppSelectorTypeAll},
++		}
++		assert.True(t, ruleAll.Matches(app), "all-type selector must match any application")
++
++		ruleCategory := &model.AlertingRule{
++			Selector: model.AppSelector{
++				Type:       model.AppSelectorTypeCategory,
++				Categories: []string{string(model.ApplicationCategoryApplication)},
++			},
++		}
++		assert.True(t, ruleCategory.Matches(app), "category selector must match application category")
++
++		rulePattern := &model.AlertingRule{
++			Selector: model.AppSelector{
++				Type:                  model.AppSelectorTypeApplications,
++				ApplicationIdPatterns: []string{"default:Deployment:*"},
++			},
++		}
++		assert.True(t, rulePattern.Matches(app), "pattern selector must match via GlobMatch")
++	})
++
++	t.Run("RbacPermissionAllowsUsesGlobMatch", func(t *testing.T) {
++		p := rbac.NewPermission(rbac.ScopeNode, rbac.ActionView, rbac.Object{"node_name": "foo*"})
++		assert.True(t, p.Allows(rbac.Actions.Project("p1").Node("foobar").View()),
++			"RBAC permission with GlobMatch pattern must allow matching node access")
++		assert.False(t, p.Allows(rbac.Actions.Project("p1").Node("barbaz").View()),
++			"RBAC permission with GlobMatch pattern must deny non-matching node access")
++	})
++
++	t.Run("PromFilterLabelsKeepAllAllowsHealthProbeMetrics", func(t *testing.T) {
++		assert.True(t, prom.FilterLabelsKeepAll("up"), "FilterLabelsKeepAll must allow 'up' metric for health probes")
++		assert.True(t, prom.FilterLabelsKeepAll("__name__"), "FilterLabelsKeepAll must allow __name__ label")
++		assert.True(t, prom.FilterLabelsKeepAll("instance"), "FilterLabelsKeepAll must allow instance label")
++	})
++
++	t.Run("PromFilterLabelsDropAllBlocksAllLabels", func(t *testing.T) {
++		assert.False(t, prom.FilterLabelsDropAll("up"), "FilterLabelsDropAll must block all labels")
++		assert.False(t, prom.FilterLabelsDropAll("__name__"), "FilterLabelsDropAll must block all labels")
++	})
++
++	t.Run("NanoIdGeneratesUniqueIdsForAlerts", func(t *testing.T) {
++		ids := map[string]bool{}
++		for i := 0; i < 100; i++ {
++			id := utils.NanoId(12)
++			assert.Len(t, id, 12, "NanoId must generate IDs of specified length")
++			assert.False(t, ids[id], "NanoId must generate unique IDs")
++			ids[id] = true
++		}
++	})
++
++	t.Run("TruncatePreservesAlertDetailIntegrity", func(t *testing.T) {
++		short := "error in checkout service"
++		assert.Equal(t, short, utils.Truncate(short, 100), "short strings must not be truncated")
++
++		long := ""
++		for i := 0; i < 200; i++ {
++			long += "a"
++		}
++		truncated := utils.Truncate(long, 100)
++		assert.Equal(t, 101, len([]rune(truncated)), "truncated string must be maxLen + ellipsis")
++		assert.Equal(t, "…", string([]rune(truncated)[len([]rune(truncated))-1:]), "truncated string must end with ellipsis")
++	})
++
++	t.Run("StringSetOperationsForStatsCollection", func(t *testing.T) {
++		ss := utils.NewStringSet()
++		ss.Add("redis")
++		ss.Add("postgres")
++		ss.Add("redis")
++
++		assert.Equal(t, 2, ss.Len(), "StringSet must deduplicate items")
++		assert.True(t, ss.Has("redis"), "StringSet must report membership")
++		assert.False(t, ss.Has("mysql"), "StringSet must report non-membership")
++
++		items := ss.Items()
++		assert.Equal(t, []string{"postgres", "redis"}, items, "StringSet items must be sorted")
++	})
++
++	t.Run("FormatFunctionsConsistentForPrometheusHealthProbeOutput", func(t *testing.T) {
++		assert.Equal(t, "0", utils.FormatFloat(0), "FormatFloat zero")
++		assert.Equal(t, "99", utils.FormatFloat(99), "FormatFloat >= 1")
++		assert.Equal(t, "0.5", utils.FormatFloat(0.5), "FormatFloat >= 0.1")
++		assert.Equal(t, "0.05", utils.FormatFloat(0.05), "FormatFloat >= 0.01")
++		assert.Equal(t, "99%", utils.FormatPercentage(99), "FormatPercentage whole number")
++		assert.Equal(t, "50%", utils.FormatPercentage(50), "FormatPercentage whole number")
++
++		v, u := utils.FormatBytes(float32(100 * 1000 * 1000))
++		assert.Equal(t, "100", v, "FormatBytes value")
++		assert.Equal(t, "MB", u, "FormatBytes unit")
++	})
++}
