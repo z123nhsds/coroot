@@ -9,10 +9,8 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"syscall"
 	"text/template"
 
-	"github.com/coroot/coroot/api"
 	"github.com/coroot/coroot/cache"
 	"github.com/coroot/coroot/cloud"
 	cloud_pricing "github.com/coroot/coroot/cloud-pricing"
@@ -22,7 +20,6 @@ import (
 	"github.com/coroot/coroot/grpc"
 	"github.com/coroot/coroot/rbac"
 	"github.com/coroot/coroot/stats"
-	"github.com/coroot/coroot/utils"
 	"github.com/coroot/coroot/watchers"
 	"github.com/gorilla/mux"
 	"golang.org/x/term"
@@ -139,20 +136,7 @@ func main() {
 	a := api.NewApi(cfg, promCache, database, coll, statsCollector, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
 	err = a.AuthInit(cfg.Auth.AnonymousRole, cfg.Auth.BootstrapAdminPassword)
 	if err != nil {
-		klog.Exitln(err)
-	}
-
-	incidents := watchers.NewIncidents(database, a.IncidentRCA)
-
-	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
-
-	router := mux.NewRouter()
-	router.Use(statsCollector.MiddleWare)
-	router.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
-	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {}).Methods(http.MethodGet)
-
-	router.HandleFunc("/v1/metrics", coll.Metrics)
-	router.HandleFunc("/v1/traces", coll.Traces)
+	a := api.NewApi(cfg, promCache, database, coll, statsCollector, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
 	router.HandleFunc("/v1/logs", coll.Logs)
 	router.HandleFunc("/v1/profiles", coll.Profiles)
 	router.HandleFunc("/v1/config", coll.Config)

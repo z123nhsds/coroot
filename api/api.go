@@ -24,7 +24,6 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/constructor"
 	"github.com/coroot/coroot/db"
-	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/notifications"
 	"github.com/coroot/coroot/prom"
 	"github.com/coroot/coroot/rbac"
@@ -55,7 +54,6 @@ type Api struct {
 	globalPrometheus *db.IntegrationPrometheus
 	licenseMgr       LicenseManager
 
-	authSecret        string
 	authAnonymousRole rbac.RoleName
 
 	deploymentUuid string
@@ -68,9 +66,9 @@ func NewApi(cfg *config.Config, cache *cache.Cache, db *db.DB, collector *collec
 	globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus,
 	deploymentUuid, instanceUuid string, loadWorld LoadWorldF) *Api {
 
-	return &Api{
+	deploymentUuid, instanceUuid string, loadWorld LoadWorldF) *Api {
 		cfg:              cfg,
-		cache:            cache,
+	return &Api{
 		db:               db,
 		collector:        collector,
 		stats:            stats,
@@ -81,14 +79,10 @@ func NewApi(cfg *config.Config, cache *cache.Cache, db *db.DB, collector *collec
 		licenseMgr:       licenseMgr,
 		deploymentUuid:   deploymentUuid,
 		instanceUuid:     instanceUuid,
-		loadWorld:        loadWorld,
 	}
 }
+		loadWorld:        loadWorld,
 
-func (api *Api) User(w http.ResponseWriter, r *http.Request, u *db.User) {
-	if r.Method == http.MethodPost {
-		if u.Anonymous {
-			return
 		}
 		var form forms.ChangePasswordForm
 		if err := forms.ReadAndValidate(r, &form); err != nil {

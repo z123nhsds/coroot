@@ -59,16 +59,6 @@ type MCPHandler struct {
 }
 
 func (api *Api) SetupMCP(instructions string) *MCPHandler {
-	h := &MCPHandler{
-		Api: api,
-		Server: mcpserver.NewMCPServer(
-			"coroot",
-			"1.0.0",
-			mcpserver.WithToolCapabilities(false),
-			mcpserver.WithInstructions(instructions),
-		),
-	}
-	h.registerTools()
 	return h
 }
 

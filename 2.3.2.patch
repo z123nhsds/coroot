@@ -1,0 +1,270 @@
+diff --git a/api/api.go b/api/api.go
+index ecc9fdd..c36417d 100644
+--- a/api/api.go
++++ b/api/api.go
+@@ -24,7 +24,6 @@ import (
+ 	"github.com/coroot/coroot/config"
+ 	"github.com/coroot/coroot/constructor"
+ 	"github.com/coroot/coroot/db"
+-	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/notifications"
+ 	"github.com/coroot/coroot/prom"
+ 	"github.com/coroot/coroot/rbac"
+@@ -55,7 +54,6 @@ type Api struct {
+ 	globalPrometheus *db.IntegrationPrometheus
+ 	licenseMgr       LicenseManager
+ 
+-	authSecret        string
+ 	authAnonymousRole rbac.RoleName
+ 
+ 	deploymentUuid string
+@@ -68,9 +66,9 @@ func NewApi(cfg *config.Config, cache *cache.Cache, db *db.DB, collector *collec
+ 	globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus,
+ 	deploymentUuid, instanceUuid string, loadWorld LoadWorldF) *Api {
+ 
+-	return &Api{
++	deploymentUuid, instanceUuid string, loadWorld LoadWorldF) *Api {
+ 		cfg:              cfg,
+-		cache:            cache,
++	return &Api{
+ 		db:               db,
+ 		collector:        collector,
+ 		stats:            stats,
+@@ -81,14 +79,10 @@ func NewApi(cfg *config.Config, cache *cache.Cache, db *db.DB, collector *collec
+ 		licenseMgr:       licenseMgr,
+ 		deploymentUuid:   deploymentUuid,
+ 		instanceUuid:     instanceUuid,
+-		loadWorld:        loadWorld,
+ 	}
+ }
++		loadWorld:        loadWorld,
+ 
+-func (api *Api) User(w http.ResponseWriter, r *http.Request, u *db.User) {
+-	if r.Method == http.MethodPost {
+-		if u.Anonymous {
+-			return
+ 		}
+ 		var form forms.ChangePasswordForm
+ 		if err := forms.ReadAndValidate(r, &form); err != nil {
+diff --git a/api/mcp.go b/api/mcp.go
+index f7b4344..564186e 100644
+--- a/api/mcp.go
++++ b/api/mcp.go
+@@ -59,16 +59,6 @@ type MCPHandler struct {
+ }
+ 
+ func (api *Api) SetupMCP(instructions string) *MCPHandler {
+-	h := &MCPHandler{
+-		Api: api,
+-		Server: mcpserver.NewMCPServer(
+-			"coroot",
+-			"1.0.0",
+-			mcpserver.WithToolCapabilities(false),
+-			mcpserver.WithInstructions(instructions),
+-		),
+-	}
+-	h.registerTools()
+ 	return h
+ }
+ 
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..33cab47 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -1,9 +1,9 @@
+ package auditor
+ 
+ import (
+-	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+ 	"gonum.org/v1/gonum/stat"
++	"gonum.org/v1/gonum/stat"
+ )
+ 
+ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+@@ -156,6 +156,140 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 	}
+ }
+ 
++func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
++	if rss.IsEmpty() {
++		return 0
++	}
++	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
++		return 0
++	}
++	var x, y []float64
++	var cx, cy []float64
++	var prev = timeseries.NaN
++	iter := rss.Iter()
++	for iter.Next() {
++		t, v := iter.Value()
++		if timeseries.IsNaN(v) {
++			continue
++		}
++		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
++			if len(cx) > len(x) {
++				x, y = cx, cy
++			}
++			cx, cy = nil, nil
++		}
++		cx = append(cx, float64(t))
++		cy = append(cy, float64(v))
++		prev = v
++	}
++	if len(cx) > len(x) {
++		x, y = cx, cy
++	}
++	if len(x) < 10 || len(x) < rss.Len()/3 {
++		return 0
++	}
++
++	alpha, beta := stat.LinearRegression(x, y, nil, false)
++	if beta <= 0 {
++		return 0
++	}
++
++	tailStart := len(x) - len(x)/4
++	for tailStart > 0 && x[len(x)-1]-x[tailStart] < float64(15*timeseries.Minute) {
++		tailStart--
++	}
++	if len(x)-tailStart < 5 {
++		return 0
++	}
++	_, tailBeta := stat.LinearRegression(x[tailStart:], y[tailStart:], nil, false)
++	if tailBeta <= 0 || tailBeta < beta*0.3 {
++		return 0
++	}
++
++	s := float32(alpha + beta*float64(to.Add(-timeseries.Hour)))
++	e := float32(alpha + beta*float64(to))
++	if !(e > 0 && e > s) {
++		return 0
++	}
++	var minGrowth float32 = 50 * 1024 * 1024
++	if !timeseries.IsNaN(limit) && limit > 0 {
++		minGrowth = limit * 0.05
++	}
++	if (e - s) < minGrowth {
++		return 0
++	}
++	if s > 0 {
++		return (e - s) / s * 100
++	}
++	return (e - s) / e * 100
++}
++	if rss.IsEmpty() {
++		return 0
++	}
++	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
++		return 0
++	}
++	var x, y []float64
++	var cx, cy []float64
++	var prev = timeseries.NaN
++	iter := rss.Iter()
++	for iter.Next() {
++		t, v := iter.Value()
++		if timeseries.IsNaN(v) {
++			continue
++		}
++		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
++			if len(cx) > len(x) {
++				x, y = cx, cy
++			}
++			cx, cy = nil, nil
++		}
++		cx = append(cx, float64(t))
++		cy = append(cy, float64(v))
++		prev = v
++	}
++	if len(cx) > len(x) {
++		x, y = cx, cy
++	}
++	if len(x) < 10 || len(x) < rss.Len()/3 {
++		return 0
++	}
++
++	alpha, beta := stat.LinearRegression(x, y, nil, false)
++	if beta <= 0 {
++		return 0
++	}
++
++	tailStart := len(x) - len(x)/4
++	for tailStart > 0 && x[len(x)-1]-x[tailStart] < float64(15*timeseries.Minute) {
++		tailStart--
++	}
++	if len(x)-tailStart < 5 {
++		return 0
++	}
++	_, tailBeta := stat.LinearRegression(x[tailStart:], y[tailStart:], nil, false)
++	if tailBeta <= 0 || tailBeta < beta*0.3 {
++		return 0
++	}
++
++	s := float32(alpha + beta*float64(to.Add(-timeseries.Hour)))
++	e := float32(alpha + beta*float64(to))
++	if !(e > 0 && e > s) {
++		return 0
++	}
++	var minGrowth float32 = 50 * 1024 * 1024
++	if !timeseries.IsNaN(limit) && limit > 0 {
++		minGrowth = limit * 0.05
++	}
++	if (e - s) < minGrowth {
++		return 0
++	}
++	if s > 0 {
++		return (e - s) / s * 100
++	}
++	return (e - s) / e * 100
++}
++
+ func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+ 	if rss.IsEmpty() {
+ 		return 0
+diff --git a/main.go b/main.go
+index 7fe206d..b549ad4 100644
+--- a/main.go
++++ b/main.go
+@@ -9,10 +9,8 @@ import (
+ 	"os"
+ 	"os/signal"
+ 	"path"
+-	"syscall"
+ 	"text/template"
+ 
+-	"github.com/coroot/coroot/api"
+ 	"github.com/coroot/coroot/cache"
+ 	"github.com/coroot/coroot/cloud"
+ 	cloud_pricing "github.com/coroot/coroot/cloud-pricing"
+@@ -22,7 +20,6 @@ import (
+ 	"github.com/coroot/coroot/grpc"
+ 	"github.com/coroot/coroot/rbac"
+ 	"github.com/coroot/coroot/stats"
+-	"github.com/coroot/coroot/utils"
+ 	"github.com/coroot/coroot/watchers"
+ 	"github.com/gorilla/mux"
+ 	"golang.org/x/term"
+@@ -139,20 +136,7 @@ func main() {
+ 	a := api.NewApi(cfg, promCache, database, coll, statsCollector, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
+ 	err = a.AuthInit(cfg.Auth.AnonymousRole, cfg.Auth.BootstrapAdminPassword)
+ 	if err != nil {
+-		klog.Exitln(err)
+-	}
+-
+-	incidents := watchers.NewIncidents(database, a.IncidentRCA)
+-
+-	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
+-
+-	router := mux.NewRouter()
+-	router.Use(statsCollector.MiddleWare)
+-	router.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
+-	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {}).Methods(http.MethodGet)
+-
+-	router.HandleFunc("/v1/metrics", coll.Metrics)
+-	router.HandleFunc("/v1/traces", coll.Traces)
++	a := api.NewApi(cfg, promCache, database, coll, statsCollector, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
+ 	router.HandleFunc("/v1/logs", coll.Logs)
+ 	router.HandleFunc("/v1/profiles", coll.Profiles)
+ 	router.HandleFunc("/v1/config", coll.Config)

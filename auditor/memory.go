@@ -1,8 +1,8 @@
 package auditor
 
 import (
-	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/timeseries"
+	"gonum.org/v1/gonum/stat"
 	"gonum.org/v1/gonum/stat"
 )
 
@@ -154,6 +154,140 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 		pressureCheck.SetStatus(model.UNKNOWN, "no data")
 		return
 	}
+}
+
+func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
+	if rss.IsEmpty() {
+		return 0
+	}
+	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
+		return 0
+	}
+	var x, y []float64
+	var cx, cy []float64
+	var prev = timeseries.NaN
+	iter := rss.Iter()
+	for iter.Next() {
+		t, v := iter.Value()
+		if timeseries.IsNaN(v) {
+			continue
+		}
+		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
+			if len(cx) > len(x) {
+				x, y = cx, cy
+			}
+			cx, cy = nil, nil
+		}
+		cx = append(cx, float64(t))
+		cy = append(cy, float64(v))
+		prev = v
+	}
+	if len(cx) > len(x) {
+		x, y = cx, cy
+	}
+	if len(x) < 10 || len(x) < rss.Len()/3 {
+		return 0
+	}
+
+	alpha, beta := stat.LinearRegression(x, y, nil, false)
+	if beta <= 0 {
+		return 0
+	}
+
+	tailStart := len(x) - len(x)/4
+	for tailStart > 0 && x[len(x)-1]-x[tailStart] < float64(15*timeseries.Minute) {
+		tailStart--
+	}
+	if len(x)-tailStart < 5 {
+		return 0
+	}
+	_, tailBeta := stat.LinearRegression(x[tailStart:], y[tailStart:], nil, false)
+	if tailBeta <= 0 || tailBeta < beta*0.3 {
+		return 0
+	}
+
+	s := float32(alpha + beta*float64(to.Add(-timeseries.Hour)))
+	e := float32(alpha + beta*float64(to))
+	if !(e > 0 && e > s) {
+		return 0
+	}
+	var minGrowth float32 = 50 * 1024 * 1024
+	if !timeseries.IsNaN(limit) && limit > 0 {
+		minGrowth = limit * 0.05
+	}
+	if (e - s) < minGrowth {
+		return 0
+	}
+	if s > 0 {
+		return (e - s) / s * 100
+	}
+	return (e - s) / e * 100
+}
+	if rss.IsEmpty() {
+		return 0
+	}
+	if rss.Reduce(timeseries.NanCount) < float32(rss.Len())*0.8 {
+		return 0
+	}
+	var x, y []float64
+	var cx, cy []float64
+	var prev = timeseries.NaN
+	iter := rss.Iter()
+	for iter.Next() {
+		t, v := iter.Value()
+		if timeseries.IsNaN(v) {
+			continue
+		}
+		if !timeseries.IsNaN(prev) && prev > 0 && v < prev*0.5 {
+			if len(cx) > len(x) {
+				x, y = cx, cy
+			}
+			cx, cy = nil, nil
+		}
+		cx = append(cx, float64(t))
+		cy = append(cy, float64(v))
+		prev = v
+	}
+	if len(cx) > len(x) {
+		x, y = cx, cy
+	}
+	if len(x) < 10 || len(x) < rss.Len()/3 {
+		return 0
+	}
+
+	alpha, beta := stat.LinearRegression(x, y, nil, false)
+	if beta <= 0 {
+		return 0
+	}
+
+	tailStart := len(x) - len(x)/4
+	for tailStart > 0 && x[len(x)-1]-x[tailStart] < float64(15*timeseries.Minute) {
+		tailStart--
+	}
+	if len(x)-tailStart < 5 {
+		return 0
+	}
+	_, tailBeta := stat.LinearRegression(x[tailStart:], y[tailStart:], nil, false)
+	if tailBeta <= 0 || tailBeta < beta*0.3 {
+		return 0
+	}
+
+	s := float32(alpha + beta*float64(to.Add(-timeseries.Hour)))
+	e := float32(alpha + beta*float64(to))
+	if !(e > 0 && e > s) {
+		return 0
+	}
+	var minGrowth float32 = 50 * 1024 * 1024
+	if !timeseries.IsNaN(limit) && limit > 0 {
+		minGrowth = limit * 0.05
+	}
+	if (e - s) < minGrowth {
+		return 0
+	}
+	if s > 0 {
+		return (e - s) / s * 100
+	}
+	return (e - s) / e * 100
 }
 
 func MemoryGrowthPct(rss *timeseries.TimeSeries, limit float32, to timeseries.Time) float32 {
