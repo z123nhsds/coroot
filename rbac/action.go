@@ -5,10 +5,10 @@ type Scope string
 type Object map[string]string
 
 const (
-	ActionAll  Verb = "*"
-	ActionView Verb = "view"
-	ActionEdit Verb = "edit"
-
+	ActionAll      Verb = "*"
+	ActionView     Verb = "view"
+	ActionEdit     Verb = "edit"
+	ActionIsolate  Verb = "isolate"
 	ScopeAll                          Scope = "*"
 	ScopeSettings                     Scope = "settings"
 	ScopeUsers                        Scope = "users"
@@ -28,11 +28,11 @@ const (
 	ScopeProjectAnomalies             Scope = "project.anomalies"
 	ScopeProjectRisks                 Scope = "project.risks"
 	ScopeApplication                  Scope = "project.application"
-	ScopeNode                         Scope = "project.node"
 	ScopeDashboards                   Scope = "project.dashboards"
 	ScopeDashboard                    Scope = "project.dashboard"
 	ScopeProjectAlertingRules         Scope = "project.alerting_rules"
 	ScopeProjectAlerts                Scope = "project.alerts"
+	ScopeProjectIsolation             Scope = "project.isolation"
 )
 
 type Action struct {

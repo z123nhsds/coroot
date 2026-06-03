@@ -1,0 +1,403 @@
+diff --git a/api/views/views.go b/api/views/views.go
+index ad22e6e..eb0f242 100644
+--- a/api/views/views.go
++++ b/api/views/views.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/coroot/coroot/api/views/dashboards"
+ 	"github.com/coroot/coroot/api/views/incident"
+ 	"github.com/coroot/coroot/api/views/inspections"
++	"github.com/coroot/coroot/api/views/isolation"
+ 	"github.com/coroot/coroot/api/views/logs"
+ 	"github.com/coroot/coroot/api/views/overview"
+ 	"github.com/coroot/coroot/api/views/profiling"
+@@ -21,6 +22,7 @@ import (
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/rbac"
++	"github.com/coroot/coroot/watchers"
+ )
+ 
+ func Overview(ctx context.Context, chs clickhouse.Clients, p *db.Project, w *model.World, view, query string) *overview.Overview {
+@@ -83,6 +85,10 @@ func User(u *db.User, projects map[db.ProjectId]string, viewonly bool) *users.Us
+ 	return users.RenderUser(u, projects, viewonly)
+ }
+ 
++func Isolation(isolator *watchers.MemoryLeakIsolator, projectId db.ProjectId) *isolation.View {
++	return isolation.Render(isolator, projectId)
++}
++
+ var (
+ 	Dashboards = &dashboards.Dashboards{}
+ )
+diff --git a/main.go b/main.go
+index 7fe206d..fa0f2c9 100644
+--- a/main.go
++++ b/main.go
+@@ -20,7 +20,6 @@ import (
+ 	"github.com/coroot/coroot/config"
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/grpc"
+-	"github.com/coroot/coroot/rbac"
+ 	"github.com/coroot/coroot/stats"
+ 	"github.com/coroot/coroot/utils"
+ 	"github.com/coroot/coroot/watchers"
+@@ -67,7 +66,7 @@ func main() {
+ 		klog.Exitln(err)
+ 	}
+ 	if err = database.Migrate(); err != nil {
+-		klog.Exitln(err)
++	if err = database.Migrate(); err != nil {
+ 	}
+ 
+ 	switch cmd {
+@@ -145,9 +144,7 @@ func main() {
+ 	incidents := watchers.NewIncidents(database, a.IncidentRCA)
+ 
+ 	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
+-
+-	router := mux.NewRouter()
+-	router.Use(statsCollector.MiddleWare)
++	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
+ 	router.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
+ 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {}).Methods(http.MethodGet)
+ 
+diff --git a/rbac/action.go b/rbac/action.go
+index 3d98f72..d497a12 100644
+--- a/rbac/action.go
++++ b/rbac/action.go
+@@ -5,10 +5,10 @@ type Scope string
+ type Object map[string]string
+ 
+ const (
+-	ActionAll  Verb = "*"
+-	ActionView Verb = "view"
+-	ActionEdit Verb = "edit"
+-
++	ActionAll      Verb = "*"
++	ActionView     Verb = "view"
++	ActionEdit     Verb = "edit"
++	ActionIsolate  Verb = "isolate"
+ 	ScopeAll                          Scope = "*"
+ 	ScopeSettings                     Scope = "settings"
+ 	ScopeUsers                        Scope = "users"
+@@ -28,11 +28,11 @@ const (
+ 	ScopeProjectAnomalies             Scope = "project.anomalies"
+ 	ScopeProjectRisks                 Scope = "project.risks"
+ 	ScopeApplication                  Scope = "project.application"
+-	ScopeNode                         Scope = "project.node"
+ 	ScopeDashboards                   Scope = "project.dashboards"
+ 	ScopeDashboard                    Scope = "project.dashboard"
+ 	ScopeProjectAlertingRules         Scope = "project.alerting_rules"
+ 	ScopeProjectAlerts                Scope = "project.alerts"
++	ScopeProjectIsolation             Scope = "project.isolation"
+ )
+ 
+ type Action struct {
+diff --git a/rbac/actions.go b/rbac/actions.go
+index 153b192..3e665a0 100644
+--- a/rbac/actions.go
++++ b/rbac/actions.go
+@@ -76,14 +76,14 @@ func (as ProjectActionSet) List() []Action {
+ 		as.Anomalies().View(),
+ 		as.Risks().View(),
+ 		as.Risks().Edit(),
+-		as.Application("*", "*", "*", "*").View(),
+-		as.Node("*").View(),
+ 		as.Dashboards().Edit(),
+ 		as.Dashboard("*").View(),
+ 		as.AlertingRules().View(),
+ 		as.AlertingRules().Edit(),
+ 		as.Alerts().View(),
+ 		as.Alerts().Edit(),
++		as.Isolation().View(),
++		as.Isolation().Isolate(),
+ 	}
+ }
+ 
+@@ -143,10 +143,6 @@ func (as ProjectActionSet) Application(category model.ApplicationCategory, names
+ 	return ApplicationActionSet{project: &as, category: category, namespace: namespace, kind: kind, name: name}
+ }
+ 
+-func (as ProjectActionSet) Node(name string) NodeActionSet {
+-	return NodeActionSet{project: &as, name: name}
+-}
+-
+ func (as ProjectActionSet) Dashboards() ProjectEditAction {
+ 	return ProjectEditAction{project: &as, scope: ScopeDashboards}
+ }
+@@ -163,6 +159,10 @@ func (as ProjectActionSet) Alerts() ProjectAction {
+ 	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
+ }
+ 
++func (as ProjectActionSet) Isolation() IsolationAction {
++	return IsolationAction{project: &as}
++}
++
+ type ProjectViewAction struct {
+ 	project *ProjectActionSet
+ 	scope   Scope
+@@ -244,3 +244,15 @@ func (as DashboardActionSet) object() Object {
+ func (as DashboardActionSet) View() Action {
+ 	return NewAction(ScopeDashboard, ActionView, as.object())
+ }
++
++type IsolationAction struct {
++	project *ProjectActionSet
++}
++
++func (as IsolationAction) View() Action {
++	return NewAction(ScopeProjectIsolation, ActionView, as.project.object())
++}
++
++func (as IsolationAction) Isolate() Action {
++	return NewAction(ScopeProjectIsolation, ActionIsolate, as.project.object())
++}
+diff --git a/rbac/role.go b/rbac/role.go
+index c78f404..4b9a8b6 100644
+--- a/rbac/role.go
++++ b/rbac/role.go
+@@ -8,9 +8,6 @@ const (
+ 	RoleAdmin  RoleName = "Admin"
+ 	RoleEditor RoleName = "Editor"
+ 	RoleViewer RoleName = "Viewer"
+-)
+-
+-var (
+ 	Roles = []Role{
+ 		NewRole(RoleAdmin,
+ 			NewPermission(ScopeAll, ActionAll, nil),
+@@ -25,19 +22,11 @@ var (
+ 			NewPermission(ScopeDashboards, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
++			NewPermission(ScopeProjectIsolation, ActionView, nil),
++			NewPermission(ScopeProjectIsolation, ActionIsolate, nil),
+ 		),
+-		NewRole(RoleViewer,
+ 			NewPermission(ScopeAll, ActionView, nil),
+ 		),
+-	}
+-)
+-
+-type RoleName string
+-
+-func (r RoleName) Valid(roles []Role) bool {
+-	return slices.ContainsFunc(roles, func(role Role) bool { return role.Name == r })
+-}
+-
+ func (r RoleName) Builtin() bool {
+ 	return r.Valid(Roles)
+ }
+diff --git a/stats/stats.go b/stats/stats.go
+index c6515f2..693e4f0 100644
+--- a/stats/stats.go
++++ b/stats/stats.go
+@@ -71,7 +71,6 @@ type Stats struct {
+ 		Instances           int                                 `json:"instances"`
+ 		Deployments         int                                 `json:"deployments"`
+ 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
+-		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
+ 	} `json:"infra"`
+ 	UX struct {
+ 		WorldLoadTimeAvg  float32                    `json:"world_load_time_avg"`
+@@ -85,6 +84,13 @@ type Stats struct {
+ 		McpCalls          map[string]int             `json:"mcp_calls"`
+ 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
+ 	} `json:"ux"`
++	Isolation struct {
++		TotalIsolations      int                                 `json:"total_isolations"`
++		ActiveIsolations     int                                 `json:"active_isolations"`
++		IsolationsByProject  map[db.ProjectId]int                `json:"isolations_by_project"`
++		IsolationsByCategory map[model.ApplicationCategory]int   `json:"isolations_by_category"`
++		AvgMemoryGrowth      float32                             `json:"avg_memory_growth"`
++	} `json:"isolation"`
+ 	Performance struct {
+ 		Constructor constructor.Profile `json:"constructor"`
+ 		Auditor     auditor.Profile     `json:"auditor"`
+@@ -165,9 +171,23 @@ type Collector struct {
+ 	heapProfiler *godeltaprof.HeapProfiler
+ 
+ 	globalClickHouse *db.IntegrationClickhouse
++
++	isolator IsolationStatsProvider
++}
++
++type IsolationStatsProvider interface {
++	GetStats() *IsolationStats
+ }
+ 
+-func NewCollector(disabled bool, instanceUuid, version string, edition string, db *db.DB, cache *cache.Cache, pricing *cloud_pricing.Manager, globalClickHouse *db.IntegrationClickhouse) *Collector {
++type IsolationStats struct {
++	TotalIsolations      int
++	ActiveIsolations     int
++	IsolationsByProject  map[db.ProjectId]int
++	IsolationsByCategory map[model.ApplicationCategory]int
++	AvgMemoryGrowth      float32
++}
++
++func NewCollector(disabled bool, instanceUuid, version string, edition string, db *db.DB, cache *cache.Cache, pricing *cloud_pricing.Manager, globalClickHouse *db.IntegrationClickhouse, isolator IsolationStatsProvider) *Collector {
+ 	c := &Collector{
+ 		db:      db,
+ 		cache:   cache,
+@@ -191,6 +211,8 @@ func NewCollector(disabled bool, instanceUuid, version string, edition string, d
+ 		globalClickHouse: globalClickHouse,
+ 
+ 		disabled: disabled,
++
++		isolator: isolator,
+ 	}
+ 
+ 	if err := c.heapProfiler.Profile(io.Discard); err != nil {
+@@ -513,19 +535,21 @@ func (c *Collector) collect() Stats {
+ 						sign = "+"
+ 					}
+ 					stats.Infra.DeploymentSummaries[sign+string(s.Report)]++
+-				}
+-			}
+ 		}
+-
+-		stats.Performance.Components = append(stats.Performance.Components, corootComponents(w.GetCorootComponents())...)
+ 	}
+ 
+-	stats.Integration.ApplicationCategories = applicationCategories.Len()
++	if c.isolator != nil {
++		isolationStats := c.isolator.GetStats()
++		stats.Isolation.TotalIsolations = isolationStats.TotalIsolations
++		stats.Isolation.ActiveIsolations = isolationStats.ActiveIsolations
++		stats.Isolation.IsolationsByProject = isolationStats.IsolationsByProject
++		stats.Isolation.IsolationsByCategory = isolationStats.IsolationsByCategory
++		stats.Isolation.AvgMemoryGrowth = isolationStats.AvgMemoryGrowth
++	}
+ 
+ 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
+ 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
+-
+-	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
++	stats.Performance.Components = corootComponents(w.Applications)
+ 
+ 	return stats
+ }
+diff --git a/watchers/watchers.go b/watchers/watchers.go
+index 03639f3..f85a8ba 100644
+--- a/watchers/watchers.go
++++ b/watchers/watchers.go
+@@ -12,29 +12,20 @@ import (
+ 	"github.com/coroot/coroot/config"
+ 	"github.com/coroot/coroot/constructor"
+ 	"github.com/coroot/coroot/db"
+-	"github.com/coroot/coroot/timeseries"
+-	"golang.org/x/exp/maps"
+ 	"k8s.io/klog"
+ )
+ 
+ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, checkDeployments bool, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus, spaceManagerCfg config.ClickHouseSpaceManager, logPatternEvaluator LogPatternEvaluator, kubernetesEventEvaluator KubernetesEventEvaluator) {
+-	var deployments *Deployments
++func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, checkDeployments bool, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus, spaceManagerCfg config.ClickHouseSpaceManager, logPatternEvaluator LogPatternEvaluator, kubernetesEventEvaluator KubernetesEventEvaluator) {
+ 	if checkDeployments {
+ 		deployments = NewDeployments(database, pricing)
+-	}
+ 
+ 	alerts := NewAlerts(database, globalPrometheus, globalClickHouse, logPatternEvaluator, kubernetesEventEvaluator)
+ 
+ 	if incidents == nil && deployments == nil && alerts == nil {
+ 		return
+ 	}
+-
+-	projectChan := make(chan db.ProjectId, 1000)
+-
+-	pending := map[db.ProjectId]bool{}
+-	pendingLock := sync.Mutex{}
+-	lastSpaceManagerRun := time.Time{}
+-
++	if incidents == nil && deployments == nil && alerts == nil {
+ 	// Fast consumer goroutine - just receives and deduplicates
+ 	go func() {
+ 		for projectId := range mcache.Updates() {
+@@ -43,6 +34,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 				pending[projectId] = true
+ 				select {
+ 				case projectChan <- projectId:
++					// Channel full, skip this update
+ 				default:
+ 					// Channel full, skip this update
+ 					pending[projectId] = false
+@@ -52,6 +44,7 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 		}
+ 		close(projectChan)
+ 	}()
++		// multi-cluster projects are skipped in the cache updater, so we need to check Incidents and Deployments by a ticker
+ 
+ 	go func() {
+ 		// multi-cluster projects are skipped in the cache updater, so we need to check Incidents and Deployments by a ticker
+@@ -66,21 +59,22 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 				projects, err := database.GetProjects()
+ 				if err != nil {
+ 					klog.Errorln(err)
+-				} else {
++							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, project.Id)
+ 					for _, project := range projects {
+ 						if project.Multicluster() {
+ 							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, project.Id)
+ 						}
++				// Remove from pending set
+ 					}
+ 				}
+ 			case projectId := <-projectChan:
+ 				// Remove from pending set
+-				pendingLock.Lock()
++							handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, project.Id)
+ 				delete(pending, projectId)
+ 				pendingLock.Unlock()
+ 
+ 				if !database.GetPrimaryLock(context.TODO()) {
+-					klog.Infoln("not the primary replica: skipping")
++				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, projectId)
+ 					continue
+ 				}
+ 
+@@ -90,8 +84,8 @@ func Start(database *db.DB, mcache *cache.Cache, pricing *pricing.Manager, incid
+ 					lastSpaceManagerRun = time.Now()
+ 					runSpaceManagerOnce(spaceManagerCfg, database, globalClickHouse)
+ 				}
+-			}
+-		}
++				handleProjectUpdate(database, mcache, pricing, incidents, deployments, alerts, projectId)
++func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, projectId db.ProjectId) {
+ 	}()
+ }
+ 
+@@ -101,7 +95,7 @@ func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.M
+ 	if err != nil {
+ 		klog.Errorln(err)
+ 		return
+-	}
++func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.Manager, incidents *Incidents, deployments *Deployments, alerts *Alerts, projectId db.ProjectId) {
+ 
+ 	cacheClients := map[db.ProjectId]constructor.Cache{}
+ 
+@@ -194,17 +188,8 @@ func handleProjectUpdate(database *db.DB, cache *cache.Cache, pricing *pricing.M
+ 	if alerts != nil {
+ 		wg.Add(1)
+ 		go func() {
+-			defer wg.Done()
+-			alerts.Check(project, world, from, to, step)
+-		}()
+-	}
+-	wg.Wait()
+-	klog.Infof("%s: iteration done in %s", project.Id, time.Since(start).Truncate(time.Millisecond))
+-}
+ 
+-func runSpaceManagerOnce(cfg config.ClickHouseSpaceManager, database *db.DB, globalClickHouse *db.IntegrationClickhouse) {
+-	if !cfg.Enabled {
+-		klog.Infof("clickhouse space manager disabled")
++	}
+ 		return
+ 	}
+ 	projects, err := database.GetProjects()
+@@ -217,5 +202,6 @@ func runSpaceManagerOnce(cfg config.ClickHouseSpaceManager, database *db.DB, glo
+ 	defer cancel()
+ 	if err := clickhouse.RunSpaceManagerForProjects(ctx, cfg, maps.Values(projects), globalClickHouse); err != nil {
+ 		klog.Errorf("clickhouse space manager: failed: %v", err)
++
+ 	}
+ }

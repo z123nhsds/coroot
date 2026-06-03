@@ -76,14 +76,14 @@ func (as ProjectActionSet) List() []Action {
 		as.Anomalies().View(),
 		as.Risks().View(),
 		as.Risks().Edit(),
-		as.Application("*", "*", "*", "*").View(),
-		as.Node("*").View(),
 		as.Dashboards().Edit(),
 		as.Dashboard("*").View(),
 		as.AlertingRules().View(),
 		as.AlertingRules().Edit(),
 		as.Alerts().View(),
 		as.Alerts().Edit(),
+		as.Isolation().View(),
+		as.Isolation().Isolate(),
 	}
 }
 
@@ -143,10 +143,6 @@ func (as ProjectActionSet) Application(category model.ApplicationCategory, names
 	return ApplicationActionSet{project: &as, category: category, namespace: namespace, kind: kind, name: name}
 }
 
-func (as ProjectActionSet) Node(name string) NodeActionSet {
-	return NodeActionSet{project: &as, name: name}
-}
-
 func (as ProjectActionSet) Dashboards() ProjectEditAction {
 	return ProjectEditAction{project: &as, scope: ScopeDashboards}
 }
@@ -161,6 +157,10 @@ func (as ProjectActionSet) AlertingRules() ProjectAction {
 
 func (as ProjectActionSet) Alerts() ProjectAction {
 	return ProjectAction{project: &as, scope: ScopeProjectAlerts}
+}
+
+func (as ProjectActionSet) Isolation() IsolationAction {
+	return IsolationAction{project: &as}
 }
 
 type ProjectViewAction struct {
@@ -243,4 +243,16 @@ func (as DashboardActionSet) object() Object {
 
 func (as DashboardActionSet) View() Action {
 	return NewAction(ScopeDashboard, ActionView, as.object())
+}
+
+type IsolationAction struct {
+	project *ProjectActionSet
+}
+
+func (as IsolationAction) View() Action {
+	return NewAction(ScopeProjectIsolation, ActionView, as.project.object())
+}
+
+func (as IsolationAction) Isolate() Action {
+	return NewAction(ScopeProjectIsolation, ActionIsolate, as.project.object())
 }

@@ -71,7 +71,6 @@ type Stats struct {
 		Instances           int                                 `json:"instances"`
 		Deployments         int                                 `json:"deployments"`
 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
-		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
 	} `json:"infra"`
 	UX struct {
 		WorldLoadTimeAvg  float32                    `json:"world_load_time_avg"`
@@ -85,6 +84,13 @@ type Stats struct {
 		McpCalls          map[string]int             `json:"mcp_calls"`
 		SentNotifications map[db.IntegrationType]int `json:"sent_notifications"`
 	} `json:"ux"`
+	Isolation struct {
+		TotalIsolations      int                                 `json:"total_isolations"`
+		ActiveIsolations     int                                 `json:"active_isolations"`
+		IsolationsByProject  map[db.ProjectId]int                `json:"isolations_by_project"`
+		IsolationsByCategory map[model.ApplicationCategory]int   `json:"isolations_by_category"`
+		AvgMemoryGrowth      float32                             `json:"avg_memory_growth"`
+	} `json:"isolation"`
 	Performance struct {
 		Constructor constructor.Profile `json:"constructor"`
 		Auditor     auditor.Profile     `json:"auditor"`
@@ -165,9 +171,23 @@ type Collector struct {
 	heapProfiler *godeltaprof.HeapProfiler
 
 	globalClickHouse *db.IntegrationClickhouse
+
+	isolator IsolationStatsProvider
 }
 
-func NewCollector(disabled bool, instanceUuid, version string, edition string, db *db.DB, cache *cache.Cache, pricing *cloud_pricing.Manager, globalClickHouse *db.IntegrationClickhouse) *Collector {
+type IsolationStatsProvider interface {
+	GetStats() *IsolationStats
+}
+
+type IsolationStats struct {
+	TotalIsolations      int
+	ActiveIsolations     int
+	IsolationsByProject  map[db.ProjectId]int
+	IsolationsByCategory map[model.ApplicationCategory]int
+	AvgMemoryGrowth      float32
+}
+
+func NewCollector(disabled bool, instanceUuid, version string, edition string, db *db.DB, cache *cache.Cache, pricing *cloud_pricing.Manager, globalClickHouse *db.IntegrationClickhouse, isolator IsolationStatsProvider) *Collector {
 	c := &Collector{
 		db:      db,
 		cache:   cache,
@@ -191,6 +211,8 @@ func NewCollector(disabled bool, instanceUuid, version string, edition string, d
 		globalClickHouse: globalClickHouse,
 
 		disabled: disabled,
+
+		isolator: isolator,
 	}
 
 	if err := c.heapProfiler.Profile(io.Discard); err != nil {
@@ -513,19 +535,21 @@ func (c *Collector) collect() Stats {
 						sign = "+"
 					}
 					stats.Infra.DeploymentSummaries[sign+string(s.Report)]++
-				}
-			}
 		}
-
-		stats.Performance.Components = append(stats.Performance.Components, corootComponents(w.GetCorootComponents())...)
 	}
 
-	stats.Integration.ApplicationCategories = applicationCategories.Len()
+	if c.isolator != nil {
+		isolationStats := c.isolator.GetStats()
+		stats.Isolation.TotalIsolations = isolationStats.TotalIsolations
+		stats.Isolation.ActiveIsolations = isolationStats.ActiveIsolations
+		stats.Isolation.IsolationsByProject = isolationStats.IsolationsByProject
+		stats.Isolation.IsolationsByCategory = isolationStats.IsolationsByCategory
+		stats.Isolation.AvgMemoryGrowth = isolationStats.AvgMemoryGrowth
+	}
 
 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
-
-	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
+	stats.Performance.Components = corootComponents(w.Applications)
 
 	return stats
 }

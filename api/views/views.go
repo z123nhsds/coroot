@@ -11,6 +11,7 @@ import (
 	"github.com/coroot/coroot/api/views/dashboards"
 	"github.com/coroot/coroot/api/views/incident"
 	"github.com/coroot/coroot/api/views/inspections"
+	"github.com/coroot/coroot/api/views/isolation"
 	"github.com/coroot/coroot/api/views/logs"
 	"github.com/coroot/coroot/api/views/overview"
 	"github.com/coroot/coroot/api/views/profiling"
@@ -21,6 +22,7 @@ import (
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/rbac"
+	"github.com/coroot/coroot/watchers"
 )
 
 func Overview(ctx context.Context, chs clickhouse.Clients, p *db.Project, w *model.World, view, query string) *overview.Overview {
@@ -81,6 +83,10 @@ func Users(us []*db.User, rs []rbac.Role) *users.Users {
 
 func User(u *db.User, projects map[db.ProjectId]string, viewonly bool) *users.User {
 	return users.RenderUser(u, projects, viewonly)
+}
+
+func Isolation(isolator *watchers.MemoryLeakIsolator, projectId db.ProjectId) *isolation.View {
+	return isolation.Render(isolator, projectId)
 }
 
 var (

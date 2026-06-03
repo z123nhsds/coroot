@@ -20,7 +20,6 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/grpc"
-	"github.com/coroot/coroot/rbac"
 	"github.com/coroot/coroot/stats"
 	"github.com/coroot/coroot/utils"
 	"github.com/coroot/coroot/watchers"
@@ -67,7 +66,7 @@ func main() {
 		klog.Exitln(err)
 	}
 	if err = database.Migrate(); err != nil {
-		klog.Exitln(err)
+	if err = database.Migrate(); err != nil {
 	}
 
 	switch cmd {
@@ -145,9 +144,7 @@ func main() {
 	incidents := watchers.NewIncidents(database, a.IncidentRCA)
 
 	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
-
-	router := mux.NewRouter()
-	router.Use(statsCollector.MiddleWare)
+	watchers.Start(database, promCache, pricing, incidents, !cfg.DoNotCheckForDeployments, globalClickhouse, globalPrometheus, cfg.ClickHouseSpaceManager, nil, nil)
 	router.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {}).Methods(http.MethodGet)
 
