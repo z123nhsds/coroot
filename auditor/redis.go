@@ -42,7 +42,7 @@ func (a *appAuditor) redis() {
 		obsolete := i.IsObsolete()
 
 		if !obsolete && !i.Redis.IsUp() {
-			availabilityCheck.AddItem("%s", i.Name)
+			availabilityCheck.AddItem(i.Name)
 		}
 
 		var total float32
@@ -54,7 +54,7 @@ func (a *appAuditor) redis() {
 			}
 		}
 		if !obsolete && total > 0 && calls > 0 && total/calls > latencyCheck.Threshold {
-			latencyCheck.AddItem("%s", i.Name)
+			latencyCheck.AddItem(i.Name)
 		}
 
 		if !obsolete && table != nil {

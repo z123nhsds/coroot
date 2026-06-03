@@ -320,8 +320,18 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step 
 			memUsage.Add(c.MemoryRss)
 			restarts.Add(c.Restarts)
 			oomKills.Add(c.OOMKills)
-			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
+			limit := c.MemoryLimit.Reduce(timeseries.Max)
+			pct := auditor.MemoryGrowthPct(c.MemoryRss, limit, to)
+			if pct > ms.MemoryLeakPercent {
 				ms.MemoryLeakPercent = pct
+			}
+			if pct > 0 {
+				if ms.ContainerMemoryGrowth == nil {
+					ms.ContainerMemoryGrowth = map[string]float32{}
+				}
+				if pct > ms.ContainerMemoryGrowth[c.Name] {
+					ms.ContainerMemoryGrowth[c.Name] = pct
+				}
 			}
 		}
 	}

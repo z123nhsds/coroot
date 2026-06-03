@@ -65,7 +65,7 @@ func (a *appAuditor) storage() {
 						ioCheck.SetValue(load)
 					}
 					if load > ioCheck.Threshold {
-						ioCheck.AddItem("%s:%s", i.Name, v.MountPoint)
+						ioCheck.AddItemf("%s:%s", i.Name, v.MountPoint)
 					}
 					if iopsChart != nil {
 						iopsChart.GetOrCreateChart(fullName).Stacked().Sorted().
@@ -98,7 +98,7 @@ func (a *appAuditor) storage() {
 							spaceCheck.SetValue(percentage)
 						}
 						if percentage > spaceCheck.Threshold {
-							spaceCheck.AddItem("%s:%s", i.Name, v.MountPoint)
+							spaceCheck.AddItemf("%s:%s", i.Name, v.MountPoint)
 						}
 					}
 					report.GetOrCreateTable("Volume", "Latency", "I/O load", "Space", "Device").AddRow(

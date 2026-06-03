@@ -132,7 +132,7 @@ func (a *appAuditor) instances() {
 				if !periodicJob {
 					restartsCheck.Inc(restarts)
 					if restarts > int64(restartsCheck.Threshold) {
-						restartsCheck.AddItem("%s/%s", i.Name, c.Name)
+						restartsCheck.AddItemf("%s/%s", i.Name, c.Name)
 					}
 				}
 			}
@@ -179,14 +179,14 @@ func (a *appAuditor) instances() {
 			availabilityCheck.SetStatus(model.WARNING, "no instances available")
 		case a.app.Id.Kind == model.ApplicationKindDaemonSet:
 			if available < desired {
-				availabilityCheck.SetStatus(
+				availabilityCheck.SetStatusf(
 					model.WARNING,
 					"%d %s unavailable",
 					unavailableInstances, utils.PluralWithToBe(unavailableInstances, "DaemonSet instance"),
 				)
 			}
 		case percentage < availabilityCheck.Threshold:
-			availabilityCheck.SetStatus(
+			availabilityCheck.SetStatusf(
 				model.WARNING,
 				"%d %s unavailable",
 				unavailableInstances, utils.PluralWithToBe(unavailableInstances, "instance"),

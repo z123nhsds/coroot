@@ -21,7 +21,7 @@ func (a *appAuditor) deployments() {
 	statuses := model.CalcApplicationDeploymentStatuses(a.app, a.w.CheckConfigs, now)
 	for i := len(statuses) - 1; i >= 0; i-- {
 		ds := statuses[i]
-		version := model.NewTableCell().SetStatus(ds.Status, ds.Deployment.Version()).AddTag("age: %s", utils.FormatDuration(ds.Lifetime, 1))
+		version := model.NewTableCell().SetStatus(ds.Status, ds.Deployment.Version()).AddTagf("age: %s", utils.FormatDuration(ds.Lifetime, 1))
 		from, to := ds.Deployment.StartedAt.Add(-30*timeseries.Minute), ds.Deployment.StartedAt.Add(30*timeseries.Minute)
 		version.Link = model.NewRouterLink(ds.Deployment.Version(), "overview").
 			SetParam("view", "applications").
@@ -43,7 +43,7 @@ func (a *appAuditor) deployments() {
 			if i == len(statuses)-1 {
 				summary.SetStub("Collecting data...")
 			} else {
-				summary.SetStub("Not enough data due to the lifetime < %s", utils.FormatDuration(model.ApplicationDeploymentMinLifetime, 1))
+				summary.SetStubf("Not enough data due to the lifetime < %s", utils.FormatDuration(model.ApplicationDeploymentMinLifetime, 1))
 			}
 		case model.ApplicationDeploymentStateStuck:
 			statusCheck.SetValue(float32(now.Sub(ds.Deployment.StartedAt)))
@@ -54,7 +54,7 @@ func (a *appAuditor) deployments() {
 				Time:    ds.Deployment.StartedAt,
 			})
 		case model.ApplicationDeploymentStateInProgress, model.ApplicationDeploymentStateCancelled:
-			summary.SetStub("%s", ds.Message)
+			summary.SetStub(ds.Message)
 		}
 
 		table.AddRow(version, deployed, summary).SetId(ds.Deployment.Id())

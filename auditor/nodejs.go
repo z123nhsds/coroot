@@ -18,7 +18,7 @@ func (a *appAuditor) nodejs() {
 			continue
 		}
 		if i.Nodejs.EventLoopBlockedTime.Last() > check.Threshold {
-			check.AddItem("%s", i.Name)
+			check.AddItem(i.Name)
 		}
 		if chart != nil {
 			chart.AddSeries(i.Name, i.Nodejs.EventLoopBlockedTime)

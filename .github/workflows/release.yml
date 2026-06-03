@@ -35,6 +35,10 @@ jobs:
   build-images:
     needs: build-frontend
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
     steps:
       - uses: actions/checkout@v5
 
@@ -59,6 +63,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           platforms: linux/amd64, linux/arm64
@@ -77,6 +82,79 @@ jobs:
         run: |
           docker create --platform linux/arm64 --name arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} &&
           docker cp arm64:/usr/bin/coroot /tmp/coroot-arm64
+
+      - name: compute binary digests
+        id: digests
+        run: |
+          AMD64_SHA256=$(sha256sum /tmp/coroot-amd64 | cut -d' ' -f1)
+          ARM64_SHA256=$(sha256sum /tmp/coroot-arm64 | cut -d' ' -f1)
+          echo "amd64_sha256=${AMD64_SHA256}" >> "$GITHUB_OUTPUT"
+          echo "arm64_sha256=${ARM64_SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: generate SLSA3 provenance
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          digest: ${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+        secrets:
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: generate binary SLSA3 provenance
+        run: |
+          cat > /tmp/provenance.json <<EOF
+          {
+            "_type": "https://in-toto.io/Statement/v1",
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+              {
+                "uri": "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/coroot-amd64",
+                "digest": { "sha256": "${{ steps.digests.outputs.amd64_sha256 }}" }
+              },
+              {
+                "uri": "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/coroot-arm64",
+                "digest": { "sha256": "${{ steps.digests.outputs.arm64_sha256 }}" }
+              }
+            ],
+            "predicate": {
+              "buildDefinition": {
+                "buildType": "https://slsa.dev/github-actions-buildtype/v1",
+                "externalParameters": {
+                  "repository": "git+https://github.com/${{ github.repository }}",
+                  "ref": "${{ github.ref }}",
+                  "sha": "${{ github.sha }}",
+                  "workflow": {
+                    "path": ".github/workflows/release.yml",
+                    "reference": "${{ github.ref }}"
+                  }
+                },
+                "internalParameters": {
+                  "github_actor": "${{ github.actor }}",
+                  "runner_os": "linux",
+                  "runner_arch": "x64",
+                  "runner_environment": "github-hosted"
+                },
+                "resolvedDependencies": [
+                  {
+                    "uri": "git+https://github.com/${{ github.repository }}",
+                    "digest": { "sha1": "${{ github.sha }}" }
+                  }
+                ]
+              },
+              "runDetails": {
+                "builder": {
+                  "id": "https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}"
+                },
+                "metadata": {
+                  "invocationID": "${{ github.run_id }}",
+                  "startedOn": "${{ github.event.repository.updated_at }}",
+                  "finishedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                }
+              }
+            }
+          }
+          EOF
+          sed -i "s/\$(date -u +%Y-%m-%dT%H:%M:%SZ)/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" /tmp/provenance.json
 
       - name: upload amd64 binary
         uses: actions/upload-release-asset@v1
@@ -97,6 +175,16 @@ jobs:
           asset_path: /tmp/coroot-arm64
           asset_name: coroot-arm64
           asset_content_type: application/octet-stream
+
+      - name: upload provenance
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: /tmp/provenance.json
+          asset_name: provenance.json
+          asset_content_type: application/json
 
       - uses: actions/github-script@v7
         env:

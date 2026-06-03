@@ -69,7 +69,7 @@ func (a *appAuditor) cpu(ncs nodeConsumersByNode) {
 			usage := c.CpuUsage.Last() / c.CpuLimit.Last() * 100
 			if usage > containerCpuCheck.Threshold {
 				usageChart.GetOrCreateChart(title).Feature()
-				containerCpuCheck.AddItem("%s@%s", c.Name, i.Name)
+				containerCpuCheck.AddItemf("%s@%s", c.Name, i.Name)
 			}
 		}
 		if usageChart != nil && len(usageChart.Charts) > 1 {
@@ -105,7 +105,7 @@ func (a *appAuditor) cpu(ncs nodeConsumersByNode) {
 
 			if i.Node.CpuUsagePercent.Last() > nodeCpuCheck.Threshold {
 				consumersChart.GetOrCreateChart(nodeName).Feature()
-				nodeCpuCheck.AddItem("%s", i.NodeName())
+				nodeCpuCheck.AddItem(i.NodeName())
 			}
 		}
 	}

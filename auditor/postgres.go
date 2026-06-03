@@ -69,7 +69,7 @@ func (a *appAuditor) postgres() {
 			Feature().
 			AddSeries(i.Name, i.Postgres.Avg)
 		if i.Postgres.Avg.Last() > latencyCheck.Threshold {
-			latencyCheck.AddItem("%s", i.Name)
+			latencyCheck.AddItem(i.Name)
 		}
 		report.
 			GetOrCreateChartInGroup(latencyChartTitle, i.Name, nil).
@@ -121,7 +121,7 @@ func (a *appAuditor) postgres() {
 		}
 		status := model.NewTableCell().SetStatus(model.OK, "up")
 		if !i.Postgres.IsUp() {
-			availabilityCheck.AddItem("%s", i.Name)
+			availabilityCheck.AddItem(i.Name)
 			if v := i.Postgres.Error.Value(); v != "" {
 				status.SetStatus(model.WARNING, v)
 			} else {
@@ -137,7 +137,7 @@ func (a *appAuditor) postgres() {
 		report.
 			GetOrCreateTable(tableColumns...).
 			AddRow(
-				model.NewTableCell(i.Name).AddTag("version: %s", i.Postgres.Version.Value()),
+				model.NewTableCell(i.Name).AddTagf("version: %s", i.Postgres.Version.Value()),
 				roleCell,
 				status,
 				model.NewTableCell(utils.FormatFloat(qps.Last())).SetUnit("/s"),
@@ -181,7 +181,7 @@ func checkReplicationLag(instanceName string, primaryLsn, lag *timeseries.TimeSe
 		greaterThanWorldWindow = ">"
 	}
 	if lagTime > timeseries.Duration(check.Threshold) {
-		check.AddItem("%s", instanceName)
+		check.AddItem(instanceName)
 	}
 	res.Value, res.Unit = utils.FormatBytes(last)
 	if lagTime > 0 {
@@ -232,7 +232,7 @@ func pgConnections(report *model.AuditReport, instance *model.Instance, connecti
 	}
 	if max := instance.Postgres.Settings["max_connections"].Samples.Last(); max > 0 && total > 0 {
 		if total/max*100 > connectionsCheck.Threshold {
-			connectionsCheck.AddItem("%s", instance.Name)
+			connectionsCheck.AddItem(instance.Name)
 		}
 	}
 

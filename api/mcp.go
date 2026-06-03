@@ -366,8 +366,21 @@ func (h *MCPHandler) registerTools() {
 		),
 		h.toolQueryLogs,
 	)
-}
-
+	h.AddTool(
+		mcp.NewTool("list_deployments",
+			mcp.WithDescription("List recent deployments for an application, including version, status, lifetime, and per-container memory growth metrics. Use this to track deployment health and detect memory leaks introduced by specific deployments."),
+			mcp.WithString("app_id",
+				mcp.Required(),
+				mcp.Description("Application id from list_applications (4-part 'cluster_id:namespace:Kind:name')."),
+			),
+			mcp.WithNumber("limit", mcp.Description("Max deployments to return. Default: 20, max: 100.")),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithOpenWorldHintAnnotation(false),
+		),
+		h.toolListDeployments,
+	)
 func (h *MCPHandler) toolListProjects(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	user := mcpUserFromContext(ctx)
 	if user == nil {
@@ -1640,4 +1653,89 @@ func MCPJSON(v any) (*mcp.CallToolResult, error) {
 		return nil, err
 	}
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+type mcpDeploymentInfo struct {
+	Version              string             `json:"version"`
+	StartedAt            int64              `json:"started_at"`
+	FinishedAt           int64              `json:"finished_at,omitempty"`
+	Lifetime             string             `json:"lifetime"`
+	State                string             `json:"state"`
+	Status               string             `json:"status"`
+	Message              string             `json:"message,omitempty"`
+	MemoryLeakPercent    float32            `json:"memory_leak_percent,omitempty"`
+	ContainerMemGrowth   map[string]float32 `json:"container_memory_growth,omitempty"`
+	CPUUsage             float32            `json:"cpu_usage,omitempty"`
+	MemoryUsage          int64              `json:"memory_usage,omitempty"`
+	Restarts             int64              `json:"restarts,omitempty"`
+	OOMKills             int64              `json:"oom_kills,omitempty"`
+	LogErrors            int64              `json:"log_errors,omitempty"`
+	LogWarnings          int64              `json:"log_warnings,omitempty"`
+}
+
+func (h *MCPHandler) toolListDeployments(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	user, project, errResult := h.RequireUserAndProject(ctx)
+	if errResult != nil {
+		return errResult, nil
+	}
+	appIdStr, err := req.RequireString("app_id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	limit := 20
+	if l, ok := req.Params.Arguments["limit"]; ok {
+		if f, ok := l.(float64); ok && f > 0 {
+			limit = int(f)
+			if limit > 100 {
+				limit = 100
+			}
+		}
+	}
+	now := timeseries.Now()
+	world, _, err := h.Api.LoadWorld(ctx, project, now.Add(-timeseries.Hour), now)
+	if err != nil {
+		klog.Errorln("mcp: list_deployments:", err)
+		return mcp.NewToolResultError("failed to load world"), nil
+	}
+	if world == nil {
+		return MCPJSON([]mcpDeploymentInfo{})
+	}
+	app, errResult := h.ResolveApp(user, project, world, appIdStr)
+	if errResult != nil {
+		return errResult, nil
+	}
+	auditor.Audit(world, project, app, nil)
+	statuses := model.CalcApplicationDeploymentStatuses(app, project.CheckConfigs, now)
+	if len(statuses) > limit {
+		statuses = statuses[:limit]
+	}
+	out := make([]mcpDeploymentInfo, 0, len(statuses))
+	for i := len(statuses) - 1; i >= 0; i-- {
+		ds := statuses[i]
+		info := mcpDeploymentInfo{
+			Version:    ds.Deployment.Version(),
+			StartedAt:  int64(ds.Deployment.StartedAt),
+			Lifetime:   utils.FormatDuration(ds.Lifetime, 1),
+			State:      ds.State.String(),
+			Status:     ds.Status.String(),
+		}
+		if ds.Deployment.FinishedAt > 0 {
+			info.FinishedAt = int64(ds.Deployment.FinishedAt)
+		}
+		if ds.Message != "" {
+			info.Message = ds.Message
+		}
+		if ms := ds.Deployment.MetricsSnapshot; ms != nil {
+			info.MemoryLeakPercent = ms.MemoryLeakPercent
+			info.ContainerMemGrowth = ms.ContainerMemoryGrowth
+			info.CPUUsage = ms.CPUUsage
+			info.MemoryUsage = ms.MemoryUsage
+			info.Restarts = ms.Restarts
+			info.OOMKills = ms.OOMKills
+			info.LogErrors = ms.LogErrors
+			info.LogWarnings = ms.LogWarnings
+		}
+		out = append(out, info)
+	}
+	return MCPJSON(out)
 }

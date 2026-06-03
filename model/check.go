@@ -552,16 +552,21 @@ func (ch *Check) Fire() {
 	ch.fired = true
 }
 
-func (ch *Check) SetStatus(status Status, format string, a ...any) {
+func (ch *Check) SetStatus(status Status, msg string) {
+	ch.Status = status
+	ch.Message = msg
+}
+
+func (ch *Check) SetStatusf(status Status, format string, a ...any) {
 	ch.Status = status
 	ch.Message = fmt.Sprintf(format, a...)
 }
 
-func (ch *Check) AddItem(format string, a ...any) {
-	if len(a) == 0 {
-		ch.items.Add(format)
-		return
-	}
+func (ch *Check) AddItem(s string) {
+	ch.items.Add(s)
+}
+
+func (ch *Check) AddItemf(format string, a ...any) {
 	ch.items.Add(fmt.Sprintf(format, a...))
 }
 
@@ -612,15 +617,15 @@ func (ch *Check) Calc() {
 	}
 	t, err := template.New("").Parse(ch.messageTemplate)
 	if err != nil {
-		ch.SetStatus(UNKNOWN, "invalid template: %s", err)
+		ch.SetStatusf(UNKNOWN, "invalid template: %s", err)
 		return
 	}
 	buf := &bytes.Buffer{}
 	if err := t.Execute(buf, CheckContext{items: ch.items, count: ch.count, value: ch.value, unit: ch.Unit, threshold: ch.Threshold}); err != nil {
-		ch.SetStatus(UNKNOWN, "failed to render message: %s", err)
+		ch.SetStatusf(UNKNOWN, "failed to render message: %s", err)
 		return
 	}
-	ch.SetStatus(WARNING, "%s", buf.String())
+	ch.SetStatus(WARNING, buf.String())
 }
 
 type CheckConfigSource string

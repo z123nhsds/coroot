@@ -165,18 +165,22 @@ func (c *TableCell) SetUnit(unit string) *TableCell {
 	return c
 }
 
-func (c *TableCell) AddTag(format string, a ...any) *TableCell {
+func (c *TableCell) AddTag(s string) *TableCell {
 	if c == nil {
 		return nil
 	}
-	if format == "" {
+	if s == "" {
 		return c
 	}
-	if len(a) == 0 {
-		c.Tags = append(c.Tags, format)
-	} else {
-		c.Tags = append(c.Tags, fmt.Sprintf(format, a...))
+	c.Tags = append(c.Tags, s)
+	return c
+}
+
+func (c *TableCell) AddTagf(format string, a ...any) *TableCell {
+	if c == nil {
+		return nil
 	}
+	c.Tags = append(c.Tags, fmt.Sprintf(format, a...))
 	return c
 }
 
@@ -196,7 +200,16 @@ func (c *TableCell) SetChart(ts *timeseries.TimeSeries) *TableCell {
 	return c
 }
 
-func (c *TableCell) SetStub(format string, a ...any) *TableCell {
+func (c *TableCell) SetStub(s string) *TableCell {
+	if c == nil {
+		return nil
+	}
+	c.Value = s
+	c.IsStub = true
+	return c
+}
+
+func (c *TableCell) SetStubf(format string, a ...any) *TableCell {
 	if c == nil {
 		return nil
 	}

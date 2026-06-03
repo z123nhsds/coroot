@@ -32,6 +32,25 @@ const (
 	ApplicationDeploymentStateSummary
 )
 
+func (s ApplicationDeploymentState) String() string {
+	switch s {
+	case ApplicationDeploymentStateStarted:
+		return "started"
+	case ApplicationDeploymentStateInProgress:
+		return "in_progress"
+	case ApplicationDeploymentStateStuck:
+		return "stuck"
+	case ApplicationDeploymentStateCancelled:
+		return "cancelled"
+	case ApplicationDeploymentStateDeployed:
+		return "deployed"
+	case ApplicationDeploymentStateSummary:
+		return "summary"
+	default:
+		return "unknown"
+	}
+}
+
 type ApplicationDeployment struct {
 	ApplicationId ApplicationId
 	Name          string
@@ -77,13 +96,14 @@ type MetricsSnapshot struct {
 	Errors   int64            `json:"errors"`
 	Latency  map[string]int64 `json:"latency"`
 
-	Restarts          int64   `json:"restarts"`
-	CPUUsage          float32 `json:"cpu_usage"`
-	MemoryLeakPercent float32 `json:"memory_leak_percent"`
-	MemoryUsage       int64   `json:"memory_usage"`
-	OOMKills          int64   `json:"oom_kills"`
-	LogErrors         int64   `json:"log_errors"`
-	LogWarnings       int64   `json:"log_warnings"`
+	Restarts              int64              `json:"restarts"`
+	CPUUsage              float32            `json:"cpu_usage"`
+	MemoryLeakPercent     float32            `json:"memory_leak_percent"`
+	ContainerMemoryGrowth map[string]float32 `json:"container_memory_growth,omitempty"`
+	MemoryUsage           int64              `json:"memory_usage"`
+	OOMKills              int64              `json:"oom_kills"`
+	LogErrors             int64              `json:"log_errors"`
+	LogWarnings           int64              `json:"log_warnings"`
 }
 
 type ApplicationDeploymentNotifications struct {
@@ -267,9 +287,22 @@ func CalcApplicationDeploymentSummary(app *Application, checkConfigs CheckConfig
 		}
 	}
 	if curr.MemoryLeakPercent > significantPercentageDifference {
-		add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour)", curr.MemoryLeakPercent)
+		if len(curr.ContainerMemoryGrowth) > 0 {
+			var containers []string
+			for name, pct := range curr.ContainerMemoryGrowth {
+				containers = append(containers, fmt.Sprintf("%s: %+.f%%/h", name, pct))
+			}
+			sort.Strings(containers)
+			add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour) in containers: %s", curr.MemoryLeakPercent, strings.Join(containers, ", "))
+		} else {
+			add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour)", curr.MemoryLeakPercent)
+		}
 	} else if prev != nil && prev.MemoryLeakPercent > significantPercentageDifference {
-		add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed")
+		if len(prev.ContainerMemoryGrowth) > 0 && len(curr.ContainerMemoryGrowth) == 0 {
+			add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed in all containers")
+		} else {
+			add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed")
+		}
 	}
 
 	// Restarts

@@ -1,0 +1,827 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index f0e2ca6..297f7dc 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -35,6 +35,10 @@ jobs:
+   build-images:
+     needs: build-frontend
+     runs-on: ubuntu-22.04
++    permissions:
++      contents: write
++      id-token: write
++      actions: read
+     steps:
+       - uses: actions/checkout@v5
+ 
+@@ -59,6 +63,7 @@ jobs:
+           password: ${{ secrets.GITHUB_TOKEN }}
+ 
+       - uses: docker/build-push-action@v6
++        id: build
+         with:
+           context: .
+           platforms: linux/amd64, linux/arm64
+@@ -78,6 +83,79 @@ jobs:
+           docker create --platform linux/arm64 --name arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} &&
+           docker cp arm64:/usr/bin/coroot /tmp/coroot-arm64
+ 
++      - name: compute binary digests
++        id: digests
++        run: |
++          AMD64_SHA256=$(sha256sum /tmp/coroot-amd64 | cut -d' ' -f1)
++          ARM64_SHA256=$(sha256sum /tmp/coroot-arm64 | cut -d' ' -f1)
++          echo "amd64_sha256=${AMD64_SHA256}" >> "$GITHUB_OUTPUT"
++          echo "arm64_sha256=${ARM64_SHA256}" >> "$GITHUB_OUTPUT"
++
++      - name: generate SLSA3 provenance
++        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
++        with:
++          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
++          digest: ${{ steps.build.outputs.digest }}
++          registry-username: ${{ github.actor }}
++        secrets:
++          registry-password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: generate binary SLSA3 provenance
++        run: |
++          cat > /tmp/provenance.json <<EOF
++          {
++            "_type": "https://in-toto.io/Statement/v1",
++            "predicateType": "https://slsa.dev/provenance/v1",
++            "subject": [
++              {
++                "uri": "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/coroot-amd64",
++                "digest": { "sha256": "${{ steps.digests.outputs.amd64_sha256 }}" }
++              },
++              {
++                "uri": "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/coroot-arm64",
++                "digest": { "sha256": "${{ steps.digests.outputs.arm64_sha256 }}" }
++              }
++            ],
++            "predicate": {
++              "buildDefinition": {
++                "buildType": "https://slsa.dev/github-actions-buildtype/v1",
++                "externalParameters": {
++                  "repository": "git+https://github.com/${{ github.repository }}",
++                  "ref": "${{ github.ref }}",
++                  "sha": "${{ github.sha }}",
++                  "workflow": {
++                    "path": ".github/workflows/release.yml",
++                    "reference": "${{ github.ref }}"
++                  }
++                },
++                "internalParameters": {
++                  "github_actor": "${{ github.actor }}",
++                  "runner_os": "linux",
++                  "runner_arch": "x64",
++                  "runner_environment": "github-hosted"
++                },
++                "resolvedDependencies": [
++                  {
++                    "uri": "git+https://github.com/${{ github.repository }}",
++                    "digest": { "sha1": "${{ github.sha }}" }
++                  }
++                ]
++              },
++              "runDetails": {
++                "builder": {
++                  "id": "https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}"
++                },
++                "metadata": {
++                  "invocationID": "${{ github.run_id }}",
++                  "startedOn": "${{ github.event.repository.updated_at }}",
++                  "finishedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
++                }
++              }
++            }
++          }
++          EOF
++          sed -i "s/\$(date -u +%Y-%m-%dT%H:%M:%SZ)/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" /tmp/provenance.json
++
+       - name: upload amd64 binary
+         uses: actions/upload-release-asset@v1
+         env:
+@@ -98,6 +176,16 @@ jobs:
+           asset_name: coroot-arm64
+           asset_content_type: application/octet-stream
+ 
++      - name: upload provenance
++        uses: actions/upload-release-asset@v1
++        env:
++          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++        with:
++          upload_url: ${{ github.event.release.upload_url }}
++          asset_path: /tmp/provenance.json
++          asset_name: provenance.json
++          asset_content_type: application/json
++
+       - uses: actions/github-script@v7
+         env:
+           RELEASE_ID: ${{ github.event.release.id }}
+diff --git a/api/mcp.go b/api/mcp.go
+index f7b4344..f69c272 100644
+--- a/api/mcp.go
++++ b/api/mcp.go
+@@ -366,8 +366,21 @@ func (h *MCPHandler) registerTools() {
+ 		),
+ 		h.toolQueryLogs,
+ 	)
+-}
+-
++	h.AddTool(
++		mcp.NewTool("list_deployments",
++			mcp.WithDescription("List recent deployments for an application, including version, status, lifetime, and per-container memory growth metrics. Use this to track deployment health and detect memory leaks introduced by specific deployments."),
++			mcp.WithString("app_id",
++				mcp.Required(),
++				mcp.Description("Application id from list_applications (4-part 'cluster_id:namespace:Kind:name')."),
++			),
++			mcp.WithNumber("limit", mcp.Description("Max deployments to return. Default: 20, max: 100.")),
++			mcp.WithReadOnlyHintAnnotation(true),
++			mcp.WithDestructiveHintAnnotation(false),
++			mcp.WithIdempotentHintAnnotation(true),
++			mcp.WithOpenWorldHintAnnotation(false),
++		),
++		h.toolListDeployments,
++	)
+ func (h *MCPHandler) toolListProjects(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+ 	user := mcpUserFromContext(ctx)
+ 	if user == nil {
+@@ -1641,3 +1654,88 @@ func MCPJSON(v any) (*mcp.CallToolResult, error) {
+ 	}
+ 	return mcp.NewToolResultText(string(data)), nil
+ }
++
++type mcpDeploymentInfo struct {
++	Version              string             `json:"version"`
++	StartedAt            int64              `json:"started_at"`
++	FinishedAt           int64              `json:"finished_at,omitempty"`
++	Lifetime             string             `json:"lifetime"`
++	State                string             `json:"state"`
++	Status               string             `json:"status"`
++	Message              string             `json:"message,omitempty"`
++	MemoryLeakPercent    float32            `json:"memory_leak_percent,omitempty"`
++	ContainerMemGrowth   map[string]float32 `json:"container_memory_growth,omitempty"`
++	CPUUsage             float32            `json:"cpu_usage,omitempty"`
++	MemoryUsage          int64              `json:"memory_usage,omitempty"`
++	Restarts             int64              `json:"restarts,omitempty"`
++	OOMKills             int64              `json:"oom_kills,omitempty"`
++	LogErrors            int64              `json:"log_errors,omitempty"`
++	LogWarnings          int64              `json:"log_warnings,omitempty"`
++}
++
++func (h *MCPHandler) toolListDeployments(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
++	user, project, errResult := h.RequireUserAndProject(ctx)
++	if errResult != nil {
++		return errResult, nil
++	}
++	appIdStr, err := req.RequireString("app_id")
++	if err != nil {
++		return mcp.NewToolResultError(err.Error()), nil
++	}
++	limit := 20
++	if l, ok := req.Params.Arguments["limit"]; ok {
++		if f, ok := l.(float64); ok && f > 0 {
++			limit = int(f)
++			if limit > 100 {
++				limit = 100
++			}
++		}
++	}
++	now := timeseries.Now()
++	world, _, err := h.Api.LoadWorld(ctx, project, now.Add(-timeseries.Hour), now)
++	if err != nil {
++		klog.Errorln("mcp: list_deployments:", err)
++		return mcp.NewToolResultError("failed to load world"), nil
++	}
++	if world == nil {
++		return MCPJSON([]mcpDeploymentInfo{})
++	}
++	app, errResult := h.ResolveApp(user, project, world, appIdStr)
++	if errResult != nil {
++		return errResult, nil
++	}
++	auditor.Audit(world, project, app, nil)
++	statuses := model.CalcApplicationDeploymentStatuses(app, project.CheckConfigs, now)
++	if len(statuses) > limit {
++		statuses = statuses[:limit]
++	}
++	out := make([]mcpDeploymentInfo, 0, len(statuses))
++	for i := len(statuses) - 1; i >= 0; i-- {
++		ds := statuses[i]
++		info := mcpDeploymentInfo{
++			Version:    ds.Deployment.Version(),
++			StartedAt:  int64(ds.Deployment.StartedAt),
++			Lifetime:   utils.FormatDuration(ds.Lifetime, 1),
++			State:      ds.State.String(),
++			Status:     ds.Status.String(),
++		}
++		if ds.Deployment.FinishedAt > 0 {
++			info.FinishedAt = int64(ds.Deployment.FinishedAt)
++		}
++		if ds.Message != "" {
++			info.Message = ds.Message
++		}
++		if ms := ds.Deployment.MetricsSnapshot; ms != nil {
++			info.MemoryLeakPercent = ms.MemoryLeakPercent
++			info.ContainerMemGrowth = ms.ContainerMemoryGrowth
++			info.CPUUsage = ms.CPUUsage
++			info.MemoryUsage = ms.MemoryUsage
++			info.Restarts = ms.Restarts
++			info.OOMKills = ms.OOMKills
++			info.LogErrors = ms.LogErrors
++			info.LogWarnings = ms.LogWarnings
++		}
++		out = append(out, info)
++	}
++	return MCPJSON(out)
++}
+diff --git a/auditor/cpu.go b/auditor/cpu.go
+index c87eec9..bc43e58 100644
+--- a/auditor/cpu.go
++++ b/auditor/cpu.go
+@@ -69,7 +69,7 @@ func (a *appAuditor) cpu(ncs nodeConsumersByNode) {
+ 			usage := c.CpuUsage.Last() / c.CpuLimit.Last() * 100
+ 			if usage > containerCpuCheck.Threshold {
+ 				usageChart.GetOrCreateChart(title).Feature()
+-				containerCpuCheck.AddItem("%s@%s", c.Name, i.Name)
++				containerCpuCheck.AddItemf("%s@%s", c.Name, i.Name)
+ 			}
+ 		}
+ 		if usageChart != nil && len(usageChart.Charts) > 1 {
+@@ -105,7 +105,7 @@ func (a *appAuditor) cpu(ncs nodeConsumersByNode) {
+ 
+ 			if i.Node.CpuUsagePercent.Last() > nodeCpuCheck.Threshold {
+ 				consumersChart.GetOrCreateChart(nodeName).Feature()
+-				nodeCpuCheck.AddItem("%s", i.NodeName())
++				nodeCpuCheck.AddItem(i.NodeName())
+ 			}
+ 		}
+ 	}
+diff --git a/auditor/deployments.go b/auditor/deployments.go
+index bd8068b..c04782d 100644
+--- a/auditor/deployments.go
++++ b/auditor/deployments.go
+@@ -21,7 +21,7 @@ func (a *appAuditor) deployments() {
+ 	statuses := model.CalcApplicationDeploymentStatuses(a.app, a.w.CheckConfigs, now)
+ 	for i := len(statuses) - 1; i >= 0; i-- {
+ 		ds := statuses[i]
+-		version := model.NewTableCell().SetStatus(ds.Status, ds.Deployment.Version()).AddTag("age: %s", utils.FormatDuration(ds.Lifetime, 1))
++		version := model.NewTableCell().SetStatus(ds.Status, ds.Deployment.Version()).AddTagf("age: %s", utils.FormatDuration(ds.Lifetime, 1))
+ 		from, to := ds.Deployment.StartedAt.Add(-30*timeseries.Minute), ds.Deployment.StartedAt.Add(30*timeseries.Minute)
+ 		version.Link = model.NewRouterLink(ds.Deployment.Version(), "overview").
+ 			SetParam("view", "applications").
+@@ -43,7 +43,7 @@ func (a *appAuditor) deployments() {
+ 			if i == len(statuses)-1 {
+ 				summary.SetStub("Collecting data...")
+ 			} else {
+-				summary.SetStub("Not enough data due to the lifetime < %s", utils.FormatDuration(model.ApplicationDeploymentMinLifetime, 1))
++				summary.SetStubf("Not enough data due to the lifetime < %s", utils.FormatDuration(model.ApplicationDeploymentMinLifetime, 1))
+ 			}
+ 		case model.ApplicationDeploymentStateStuck:
+ 			statusCheck.SetValue(float32(now.Sub(ds.Deployment.StartedAt)))
+@@ -54,7 +54,7 @@ func (a *appAuditor) deployments() {
+ 				Time:    ds.Deployment.StartedAt,
+ 			})
+ 		case model.ApplicationDeploymentStateInProgress, model.ApplicationDeploymentStateCancelled:
+-			summary.SetStub("%s", ds.Message)
++			summary.SetStub(ds.Message)
+ 		}
+ 
+ 		table.AddRow(version, deployed, summary).SetId(ds.Deployment.Id())
+diff --git a/auditor/dotnet.go b/auditor/dotnet.go
+index 12f4008..f62c345 100644
+--- a/auditor/dotnet.go
++++ b/auditor/dotnet.go
+@@ -60,7 +60,7 @@ func (a *appAuditor) dotnet() {
+ 			fullName := name + "@" + i.Name
+ 
+ 			if !obsolete && !runtime.IsUp() {
+-				availabilityCheck.AddItem("%s", fullName)
++				availabilityCheck.AddItem(fullName)
+ 			}
+ 			if heapChart != nil {
+ 				chart := heapChart.GetOrCreateChart(fullName).Stacked()
+diff --git a/auditor/instances.go b/auditor/instances.go
+index 24e9aa3..b2367a1 100644
+--- a/auditor/instances.go
++++ b/auditor/instances.go
+@@ -132,7 +132,7 @@ func (a *appAuditor) instances() {
+ 				if !periodicJob {
+ 					restartsCheck.Inc(restarts)
+ 					if restarts > int64(restartsCheck.Threshold) {
+-						restartsCheck.AddItem("%s/%s", i.Name, c.Name)
++						restartsCheck.AddItemf("%s/%s", i.Name, c.Name)
+ 					}
+ 				}
+ 			}
+@@ -179,14 +179,14 @@ func (a *appAuditor) instances() {
+ 			availabilityCheck.SetStatus(model.WARNING, "no instances available")
+ 		case a.app.Id.Kind == model.ApplicationKindDaemonSet:
+ 			if available < desired {
+-				availabilityCheck.SetStatus(
++				availabilityCheck.SetStatusf(
+ 					model.WARNING,
+ 					"%d %s unavailable",
+ 					unavailableInstances, utils.PluralWithToBe(unavailableInstances, "DaemonSet instance"),
+ 				)
+ 			}
+ 		case percentage < availabilityCheck.Threshold:
+-			availabilityCheck.SetStatus(
++			availabilityCheck.SetStatusf(
+ 				model.WARNING,
+ 				"%d %s unavailable",
+ 				unavailableInstances, utils.PluralWithToBe(unavailableInstances, "instance"),
+diff --git a/auditor/jvm.go b/auditor/jvm.go
+index ee2a2ea..8d714d2 100644
+--- a/auditor/jvm.go
++++ b/auditor/jvm.go
+@@ -44,10 +44,10 @@ func (a *appAuditor) jvm() {
+ 			fullName := name + "@" + i.Name
+ 
+ 			if !obsolete && !succeeded && !j.IsUp() {
+-				availabilityCheck.AddItem("%s", fullName)
++				availabilityCheck.AddItem(fullName)
+ 			}
+ 			if !obsolete && j.SafepointTime.Last() > safepointCheck.Threshold {
+-				safepointCheck.AddItem("%s", i.Name)
++				safepointCheck.AddItem(i.Name)
+ 			}
+ 
+ 			if heapChart != nil {
+diff --git a/auditor/logs.go b/auditor/logs.go
+index 737ba4d..94b4205 100644
+--- a/auditor/logs.go
++++ b/auditor/logs.go
+@@ -19,7 +19,7 @@ func (a *appAuditor) logs() {
+ 		sum.Add(msgs.Messages)
+ 		for hash, pattern := range msgs.Patterns {
+ 			if pattern.Messages.Reduce(timeseries.NanSum) > 0 {
+-				check.AddItem("%s", hash)
++				check.AddItem(hash)
+ 			}
+ 		}
+ 	}
+diff --git a/auditor/memcached.go b/auditor/memcached.go
+index 8ba363d..fffa07b 100644
+--- a/auditor/memcached.go
++++ b/auditor/memcached.go
+@@ -39,7 +39,7 @@ func (a *appAuditor) memcached() {
+ 		obsolete := i.IsObsolete()
+ 
+ 		if !obsolete && !i.Memcached.IsUp() {
+-			availabilityCheck.AddItem("%s", i.Name)
++			availabilityCheck.AddItem(i.Name)
+ 		}
+ 
+ 		if !obsolete && table != nil {
+diff --git a/auditor/memory.go b/auditor/memory.go
+index 13b8818..17741e2 100644
+--- a/auditor/memory.go
++++ b/auditor/memory.go
+@@ -70,7 +70,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
+ 			pressureSome.Add(c.MemoryPressureSome)
+ 			pressureFull.Add(c.MemoryPressureFull)
+ 			if v := c.MemoryPressureSome.Last(); v > pressureCheck.Threshold {
+-				pressureCheck.AddItem("%s", i.Name)
++				pressureCheck.AddItem(i.Name)
+ 			}
+ 		}
+ 		if pressureChart != nil {
+diff --git a/auditor/mongodb.go b/auditor/mongodb.go
+index 8f44141..0f36de4 100644
+--- a/auditor/mongodb.go
++++ b/auditor/mongodb.go
+@@ -42,7 +42,7 @@ func (a *appAuditor) mongodb() {
+ 		}
+ 		obsolete := i.IsObsolete()
+ 		if !obsolete && !i.Mongodb.IsUp() {
+-			availabilityCheck.AddItem("%s", i.Name)
++			availabilityCheck.AddItem(i.Name)
+ 		}
+ 
+ 		if obsolete {
+@@ -68,7 +68,7 @@ func (a *appAuditor) mongodb() {
+ 			if lagTime := lag.Last(); !timeseries.IsNaN(lagTime) {
+ 				lagCell.SetValue(utils.FormatFloat(lagTime)).SetUnit("s")
+ 				if timeseries.Duration(lagTime) > timeseries.Duration(replicationLagCheck.Threshold) {
+-					replicationLagCheck.AddItem("%s", i.Name)
++					replicationLagCheck.AddItem(i.Name)
+ 				}
+ 			}
+ 			if replicationLagChart != nil {
+diff --git a/auditor/mysql.go b/auditor/mysql.go
+index ec32a7c..356cf9d 100644
+--- a/auditor/mysql.go
++++ b/auditor/mysql.go
+@@ -54,7 +54,7 @@ func (a *appAuditor) mysql() {
+ 		}
+ 		obsolete := i.IsObsolete()
+ 		if !obsolete && !i.Mysql.IsUp() {
+-			availabilityCheck.AddItem("%s", i.Name)
++			availabilityCheck.AddItem(i.Name)
+ 		}
+ 
+ 		if obsolete {
+@@ -66,7 +66,7 @@ func (a *appAuditor) mysql() {
+ 			if lagTime := i.Mysql.ReplicationLagSeconds.Last(); !timeseries.IsNaN(lagTime) {
+ 				lagCell.SetValue(utils.FormatFloat(lagTime)).SetUnit("s")
+ 				if timeseries.Duration(lagTime) > timeseries.Duration(replicationLagCheck.Threshold) {
+-					replicationLagCheck.AddItem("%s", i.Name)
++					replicationLagCheck.AddItem(i.Name)
+ 				}
+ 			}
+ 			if replicationLagChart != nil {
+@@ -77,7 +77,7 @@ func (a *appAuditor) mysql() {
+ 		maxConns := i.Mysql.ConnectionsMax.Last()
+ 		if !timeseries.IsNaN(currConns) && !timeseries.IsNaN(maxConns) {
+ 			if currConns/maxConns*100 > connectionsCheck.Threshold {
+-				connectionsCheck.AddItem("%s", i.Name)
++				connectionsCheck.AddItem(i.Name)
+ 			}
+ 		}
+ 		if connectionsChart != nil {
+@@ -102,7 +102,7 @@ func (a *appAuditor) mysql() {
+ 		if i.Mysql.ReplicationIOStatus != nil {
+ 			status := i.Mysql.ReplicationIOStatus.Status.Last()
+ 			if status < 1 {
+-				replicationStatusCheck.AddItem("%s", i.Name)
++				replicationStatusCheck.AddItem(i.Name)
+ 				msg := i.Mysql.ReplicationIOStatus.LastError.Value()
+ 				if msg == "" {
+ 					msg = i.Mysql.ReplicationIOStatus.LastState.Value()
+@@ -117,7 +117,7 @@ func (a *appAuditor) mysql() {
+ 		if replStatusCell.Status != nil && *replStatusCell.Status < model.WARNING && i.Mysql.ReplicationSQLStatus != nil {
+ 			status := i.Mysql.ReplicationSQLStatus.Status.Last()
+ 			if status < 1 {
+-				replicationStatusCheck.AddItem("%s", i.Name)
++				replicationStatusCheck.AddItem(i.Name)
+ 				msg := i.Mysql.ReplicationSQLStatus.LastError.Value()
+ 				if msg == "" {
+ 					msg = i.Mysql.ReplicationSQLStatus.LastState.Value()
+diff --git a/auditor/network.go b/auditor/network.go
+index 6400a67..bdad6ee 100644
+--- a/auditor/network.go
++++ b/auditor/network.go
+@@ -53,14 +53,14 @@ func (a *appAuditor) network() {
+ 				rttCheck.SetValue(last)
+ 			}
+ 			if last > rttCheck.Threshold {
+-				rttCheck.AddItem("%s", u.RemoteApplication.Id.String())
++				rttCheck.AddItem(u.RemoteApplication.Id.String())
+ 			}
+ 		}
+ 		if u.HasConnectivityIssues() {
+-			connectivityCheck.AddItem("%s", u.RemoteApplication.Id.String())
++			connectivityCheck.AddItem(u.RemoteApplication.Id.String())
+ 		}
+ 		if u.HasFailedConnectionAttempts() {
+-			connectionsCheck.AddItem("%s", u.RemoteApplication.Id.String())
++			connectionsCheck.AddItem(u.RemoteApplication.Id.String())
+ 		}
+ 		legend := "→" + u.RemoteApplication.Id.Name
+ 		if rttChart != nil {
+diff --git a/auditor/nodejs.go b/auditor/nodejs.go
+index 0d9a691..fbf7b59 100644
+--- a/auditor/nodejs.go
++++ b/auditor/nodejs.go
+@@ -18,7 +18,7 @@ func (a *appAuditor) nodejs() {
+ 			continue
+ 		}
+ 		if i.Nodejs.EventLoopBlockedTime.Last() > check.Threshold {
+-			check.AddItem("%s", i.Name)
++			check.AddItem(i.Name)
+ 		}
+ 		if chart != nil {
+ 			chart.AddSeries(i.Name, i.Nodejs.EventLoopBlockedTime)
+diff --git a/auditor/postgres.go b/auditor/postgres.go
+index 662ea4d..e715254 100644
+--- a/auditor/postgres.go
++++ b/auditor/postgres.go
+@@ -69,7 +69,7 @@ func (a *appAuditor) postgres() {
+ 			Feature().
+ 			AddSeries(i.Name, i.Postgres.Avg)
+ 		if i.Postgres.Avg.Last() > latencyCheck.Threshold {
+-			latencyCheck.AddItem("%s", i.Name)
++			latencyCheck.AddItem(i.Name)
+ 		}
+ 		report.
+ 			GetOrCreateChartInGroup(latencyChartTitle, i.Name, nil).
+@@ -121,7 +121,7 @@ func (a *appAuditor) postgres() {
+ 		}
+ 		status := model.NewTableCell().SetStatus(model.OK, "up")
+ 		if !i.Postgres.IsUp() {
+-			availabilityCheck.AddItem("%s", i.Name)
++			availabilityCheck.AddItem(i.Name)
+ 			if v := i.Postgres.Error.Value(); v != "" {
+ 				status.SetStatus(model.WARNING, v)
+ 			} else {
+@@ -137,7 +137,7 @@ func (a *appAuditor) postgres() {
+ 		report.
+ 			GetOrCreateTable(tableColumns...).
+ 			AddRow(
+-				model.NewTableCell(i.Name).AddTag("version: %s", i.Postgres.Version.Value()),
++				model.NewTableCell(i.Name).AddTagf("version: %s", i.Postgres.Version.Value()),
+ 				roleCell,
+ 				status,
+ 				model.NewTableCell(utils.FormatFloat(qps.Last())).SetUnit("/s"),
+@@ -181,7 +181,7 @@ func checkReplicationLag(instanceName string, primaryLsn, lag *timeseries.TimeSe
+ 		greaterThanWorldWindow = ">"
+ 	}
+ 	if lagTime > timeseries.Duration(check.Threshold) {
+-		check.AddItem("%s", instanceName)
++		check.AddItem(instanceName)
+ 	}
+ 	res.Value, res.Unit = utils.FormatBytes(last)
+ 	if lagTime > 0 {
+@@ -232,7 +232,7 @@ func pgConnections(report *model.AuditReport, instance *model.Instance, connecti
+ 	}
+ 	if max := instance.Postgres.Settings["max_connections"].Samples.Last(); max > 0 && total > 0 {
+ 		if total/max*100 > connectionsCheck.Threshold {
+-			connectionsCheck.AddItem("%s", instance.Name)
++			connectionsCheck.AddItem(instance.Name)
+ 		}
+ 	}
+ 
+diff --git a/auditor/python.go b/auditor/python.go
+index 7237d81..59548e9 100644
+--- a/auditor/python.go
++++ b/auditor/python.go
+@@ -18,7 +18,7 @@ func (a *appAuditor) python() {
+ 			continue
+ 		}
+ 		if i.Python.GILWaitTime.Last() > gilCheck.Threshold {
+-			gilCheck.AddItem("%s", i.Name)
++			gilCheck.AddItem(i.Name)
+ 		}
+ 		if gilChart != nil {
+ 			gilChart.AddSeries(i.Name, i.Python.GILWaitTime)
+diff --git a/auditor/redis.go b/auditor/redis.go
+index 18e7a08..6967373 100644
+--- a/auditor/redis.go
++++ b/auditor/redis.go
+@@ -42,7 +42,7 @@ func (a *appAuditor) redis() {
+ 		obsolete := i.IsObsolete()
+ 
+ 		if !obsolete && !i.Redis.IsUp() {
+-			availabilityCheck.AddItem("%s", i.Name)
++			availabilityCheck.AddItem(i.Name)
+ 		}
+ 
+ 		var total float32
+@@ -54,7 +54,7 @@ func (a *appAuditor) redis() {
+ 			}
+ 		}
+ 		if !obsolete && total > 0 && calls > 0 && total/calls > latencyCheck.Threshold {
+-			latencyCheck.AddItem("%s", i.Name)
++			latencyCheck.AddItem(i.Name)
+ 		}
+ 
+ 		if !obsolete && table != nil {
+diff --git a/auditor/slo.go b/auditor/slo.go
+index 66d0ac1..9225dba 100644
+--- a/auditor/slo.go
++++ b/auditor/slo.go
+@@ -36,7 +36,7 @@ func availability(w *model.World, app *model.Application, report *model.AuditRep
+ 	if last := lastIncident(app); last != nil && (!last.Resolved() || last.ResolvedAt.After(w.Ctx.To)) {
+ 		for _, br := range last.Details.AvailabilityBurnRates {
+ 			if br.Severity > model.OK {
+-				check.SetStatus(br.Severity, "%s", br.FormatSLOStatus())
++				check.SetStatusf(br.Severity, "%s", br.FormatSLOStatus())
+ 				break
+ 			}
+ 		}
+@@ -60,7 +60,7 @@ func latency(w *model.World, app *model.Application, report *model.AuditReport)
+ 	if last := lastIncident(app); last != nil && (!last.Resolved() || last.ResolvedAt.After(w.Ctx.To)) {
+ 		for _, br := range last.Details.LatencyBurnRates {
+ 			if br.Severity > model.OK {
+-				check.SetStatus(br.Severity, "%s", br.FormatSLOStatus())
++				check.SetStatusf(br.Severity, "%s", br.FormatSLOStatus())
+ 				break
+ 			}
+ 		}
+diff --git a/auditor/storage.go b/auditor/storage.go
+index 04b5218..a412e2a 100644
+--- a/auditor/storage.go
++++ b/auditor/storage.go
+@@ -65,7 +65,7 @@ func (a *appAuditor) storage() {
+ 						ioCheck.SetValue(load)
+ 					}
+ 					if load > ioCheck.Threshold {
+-						ioCheck.AddItem("%s:%s", i.Name, v.MountPoint)
++						ioCheck.AddItemf("%s:%s", i.Name, v.MountPoint)
+ 					}
+ 					if iopsChart != nil {
+ 						iopsChart.GetOrCreateChart(fullName).Stacked().Sorted().
+@@ -98,7 +98,7 @@ func (a *appAuditor) storage() {
+ 							spaceCheck.SetValue(percentage)
+ 						}
+ 						if percentage > spaceCheck.Threshold {
+-							spaceCheck.AddItem("%s:%s", i.Name, v.MountPoint)
++							spaceCheck.AddItemf("%s:%s", i.Name, v.MountPoint)
+ 						}
+ 					}
+ 					report.GetOrCreateTable("Volume", "Latency", "I/O load", "Space", "Device").AddRow(
+diff --git a/model/application_deployment.go b/model/application_deployment.go
+index 6cb970d..c37878d 100644
+--- a/model/application_deployment.go
++++ b/model/application_deployment.go
+@@ -32,6 +32,25 @@ const (
+ 	ApplicationDeploymentStateSummary
+ )
+ 
++func (s ApplicationDeploymentState) String() string {
++	switch s {
++	case ApplicationDeploymentStateStarted:
++		return "started"
++	case ApplicationDeploymentStateInProgress:
++		return "in_progress"
++	case ApplicationDeploymentStateStuck:
++		return "stuck"
++	case ApplicationDeploymentStateCancelled:
++		return "cancelled"
++	case ApplicationDeploymentStateDeployed:
++		return "deployed"
++	case ApplicationDeploymentStateSummary:
++		return "summary"
++	default:
++		return "unknown"
++	}
++}
++
+ type ApplicationDeployment struct {
+ 	ApplicationId ApplicationId
+ 	Name          string
+@@ -77,13 +96,14 @@ type MetricsSnapshot struct {
+ 	Errors   int64            `json:"errors"`
+ 	Latency  map[string]int64 `json:"latency"`
+ 
+-	Restarts          int64   `json:"restarts"`
+-	CPUUsage          float32 `json:"cpu_usage"`
+-	MemoryLeakPercent float32 `json:"memory_leak_percent"`
+-	MemoryUsage       int64   `json:"memory_usage"`
+-	OOMKills          int64   `json:"oom_kills"`
+-	LogErrors         int64   `json:"log_errors"`
+-	LogWarnings       int64   `json:"log_warnings"`
++	Restarts              int64              `json:"restarts"`
++	CPUUsage              float32            `json:"cpu_usage"`
++	MemoryLeakPercent     float32            `json:"memory_leak_percent"`
++	ContainerMemoryGrowth map[string]float32 `json:"container_memory_growth,omitempty"`
++	MemoryUsage           int64              `json:"memory_usage"`
++	OOMKills              int64              `json:"oom_kills"`
++	LogErrors             int64              `json:"log_errors"`
++	LogWarnings           int64              `json:"log_warnings"`
+ }
+ 
+ type ApplicationDeploymentNotifications struct {
+@@ -267,9 +287,22 @@ func CalcApplicationDeploymentSummary(app *Application, checkConfigs CheckConfig
+ 		}
+ 	}
+ 	if curr.MemoryLeakPercent > significantPercentageDifference {
+-		add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour)", curr.MemoryLeakPercent)
++		if len(curr.ContainerMemoryGrowth) > 0 {
++			var containers []string
++			for name, pct := range curr.ContainerMemoryGrowth {
++				containers = append(containers, fmt.Sprintf("%s: %+.f%%/h", name, pct))
++			}
++			sort.Strings(containers)
++			add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour) in containers: %s", curr.MemoryLeakPercent, strings.Join(containers, ", "))
++		} else {
++			add(AuditReportMemory, false, "Memory: a memory leak detected (%+.f%% per hour)", curr.MemoryLeakPercent)
++		}
+ 	} else if prev != nil && prev.MemoryLeakPercent > significantPercentageDifference {
+-		add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed")
++		if len(prev.ContainerMemoryGrowth) > 0 && len(curr.ContainerMemoryGrowth) == 0 {
++			add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed in all containers")
++		} else {
++			add(AuditReportMemory, true, "Memory: looks like the memory leak has been fixed")
++		}
+ 	}
+ 
+ 	// Restarts
+diff --git a/model/check.go b/model/check.go
+index a90c881..aa11fea 100644
+--- a/model/check.go
++++ b/model/check.go
+@@ -552,16 +552,21 @@ func (ch *Check) Fire() {
+ 	ch.fired = true
+ }
+ 
+-func (ch *Check) SetStatus(status Status, format string, a ...any) {
++func (ch *Check) SetStatus(status Status, msg string) {
++	ch.Status = status
++	ch.Message = msg
++}
++
++func (ch *Check) SetStatusf(status Status, format string, a ...any) {
+ 	ch.Status = status
+ 	ch.Message = fmt.Sprintf(format, a...)
+ }
+ 
+-func (ch *Check) AddItem(format string, a ...any) {
+-	if len(a) == 0 {
+-		ch.items.Add(format)
+-		return
+-	}
++func (ch *Check) AddItem(s string) {
++	ch.items.Add(s)
++}
++
++func (ch *Check) AddItemf(format string, a ...any) {
+ 	ch.items.Add(fmt.Sprintf(format, a...))
+ }
+ 
+@@ -612,15 +617,15 @@ func (ch *Check) Calc() {
+ 	}
+ 	t, err := template.New("").Parse(ch.messageTemplate)
+ 	if err != nil {
+-		ch.SetStatus(UNKNOWN, "invalid template: %s", err)
++		ch.SetStatusf(UNKNOWN, "invalid template: %s", err)
+ 		return
+ 	}
+ 	buf := &bytes.Buffer{}
+ 	if err := t.Execute(buf, CheckContext{items: ch.items, count: ch.count, value: ch.value, unit: ch.Unit, threshold: ch.Threshold}); err != nil {
+-		ch.SetStatus(UNKNOWN, "failed to render message: %s", err)
++		ch.SetStatusf(UNKNOWN, "failed to render message: %s", err)
+ 		return
+ 	}
+-	ch.SetStatus(WARNING, "%s", buf.String())
++	ch.SetStatus(WARNING, buf.String())
+ }
+ 
+ type CheckConfigSource string
+diff --git a/model/table.go b/model/table.go
+index 261cb5a..4977c3a 100644
+--- a/model/table.go
++++ b/model/table.go
+@@ -165,18 +165,22 @@ func (c *TableCell) SetUnit(unit string) *TableCell {
+ 	return c
+ }
+ 
+-func (c *TableCell) AddTag(format string, a ...any) *TableCell {
++func (c *TableCell) AddTag(s string) *TableCell {
+ 	if c == nil {
+ 		return nil
+ 	}
+-	if format == "" {
++	if s == "" {
+ 		return c
+ 	}
+-	if len(a) == 0 {
+-		c.Tags = append(c.Tags, format)
+-	} else {
+-		c.Tags = append(c.Tags, fmt.Sprintf(format, a...))
++	c.Tags = append(c.Tags, s)
++	return c
++}
++
++func (c *TableCell) AddTagf(format string, a ...any) *TableCell {
++	if c == nil {
++		return nil
+ 	}
++	c.Tags = append(c.Tags, fmt.Sprintf(format, a...))
+ 	return c
+ }
+ 
+@@ -196,7 +200,16 @@ func (c *TableCell) SetChart(ts *timeseries.TimeSeries) *TableCell {
+ 	return c
+ }
+ 
+-func (c *TableCell) SetStub(format string, a ...any) *TableCell {
++func (c *TableCell) SetStub(s string) *TableCell {
++	if c == nil {
++		return nil
++	}
++	c.Value = s
++	c.IsStub = true
++	return c
++}
++
++func (c *TableCell) SetStubf(format string, a ...any) *TableCell {
+ 	if c == nil {
+ 		return nil
+ 	}
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..5ed70f1 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -320,9 +320,19 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step
+ 			memUsage.Add(c.MemoryRss)
+ 			restarts.Add(c.Restarts)
+ 			oomKills.Add(c.OOMKills)
+-			if pct := auditor.MemoryGrowthPct(c.MemoryRss, c.MemoryLimit.Reduce(timeseries.Max), to); pct > ms.MemoryLeakPercent {
++			limit := c.MemoryLimit.Reduce(timeseries.Max)
++			pct := auditor.MemoryGrowthPct(c.MemoryRss, limit, to)
++			if pct > ms.MemoryLeakPercent {
+ 				ms.MemoryLeakPercent = pct
+ 			}
++			if pct > 0 {
++				if ms.ContainerMemoryGrowth == nil {
++					ms.ContainerMemoryGrowth = map[string]float32{}
++				}
++				if pct > ms.ContainerMemoryGrowth[c.Name] {
++					ms.ContainerMemoryGrowth[c.Name] = pct
++				}
++			}
+ 		}
+ 	}
+ 	ms.CPUUsage = sumRate(cpuUsage.Get(), from, to, step)
