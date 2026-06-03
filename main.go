@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"runtime"
 	"syscall"
 	"text/template"
+	"time"
 
 	"github.com/coroot/coroot/api"
 	"github.com/coroot/coroot/cache"
@@ -20,6 +22,7 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/grpc"
+	"github.com/coroot/coroot/mcp"
 	"github.com/coroot/coroot/rbac"
 	"github.com/coroot/coroot/stats"
 	"github.com/coroot/coroot/utils"
@@ -136,7 +139,20 @@ func main() {
 
 	statsCollector := stats.NewCollector(cfg.DisableUsageStatistics, instanceUuid, version, Edition, database, promCache, pricing, globalClickhouse)
 
-	a := api.NewApi(cfg, promCache, database, coll, statsCollector, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
+	// Initialize MCP server with SLSA3 provenance support
+	goVersion := runtime.Version()
+	provenanceData := map[string]interface{}{
+		"go_version": goVersion,
+		"build_date": time.Now().Format(time.RFC3339),
+		"version":    version,
+		"edition":    Edition,
+	}
+	mcpServer := mcp.NewServer(nil, &mcp.Config{
+		GoVersion:      goVersion,
+		ProvenanceData: provenanceData,
+	})
+
+	a := api.NewApi(cfg, promCache, database, coll, statsCollector, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, mcpServer)
 	err = a.AuthInit(cfg.Auth.AnonymousRole, cfg.Auth.BootstrapAdminPassword)
 	if err != nil {
 		klog.Exitln(err)

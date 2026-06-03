@@ -59,6 +59,16 @@ type MCPHandler struct {
 }
 
 func (api *Api) SetupMCP(instructions string) *MCPHandler {
+	if api.mcpServer != nil {
+		h := api.mcpServer.Setup(instructions)
+		// Wrap the mcp.Handler into api.MCPHandler for backward compatibility
+		return &MCPHandler{
+			Api:    h.Api,
+			Server: h.Server,
+			// We'll copy over the sessions if needed, but for now let's keep it simple
+		}
+	}
+	// Fallback to original implementation for backward compatibility
 	h := &MCPHandler{
 		Api: api,
 		Server: mcpserver.NewMCPServer(

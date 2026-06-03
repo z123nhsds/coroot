@@ -24,6 +24,7 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/constructor"
 	"github.com/coroot/coroot/db"
+	"github.com/coroot/coroot/mcp"
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/notifications"
 	"github.com/coroot/coroot/prom"
@@ -54,6 +55,7 @@ type Api struct {
 	globalClickHouse *db.IntegrationClickhouse
 	globalPrometheus *db.IntegrationPrometheus
 	licenseMgr       LicenseManager
+	mcpServer        *mcp.Server
 
 	authSecret        string
 	authAnonymousRole rbac.RoleName
@@ -66,9 +68,9 @@ type Api struct {
 
 func NewApi(cfg *config.Config, cache *cache.Cache, db *db.DB, collector *collector.Collector, stats *stats.Collector, pricing *pricing.Manager, roles rbac.RoleManager, licenseMgr LicenseManager,
 	globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus,
-	deploymentUuid, instanceUuid string, loadWorld LoadWorldF) *Api {
+	deploymentUuid, instanceUuid string, mcpServer *mcp.Server) *Api {
 
-	return &Api{
+	api := &Api{
 		cfg:              cfg,
 		cache:            cache,
 		db:               db,
@@ -79,10 +81,14 @@ func NewApi(cfg *config.Config, cache *cache.Cache, db *db.DB, collector *collec
 		globalClickHouse: globalClickHouse,
 		globalPrometheus: globalPrometheus,
 		licenseMgr:       licenseMgr,
+		mcpServer:        mcpServer,
 		deploymentUuid:   deploymentUuid,
 		instanceUuid:     instanceUuid,
-		loadWorld:        loadWorld,
 	}
+	if mcpServer != nil {
+		mcpServer.ApiHandler = api
+	}
+	return api
 }
 
 func (api *Api) User(w http.ResponseWriter, r *http.Request, u *db.User) {
