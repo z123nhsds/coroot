@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"syscall"
 	"text/template"
 
 	"github.com/coroot/coroot/api"
@@ -218,7 +217,7 @@ func main() {
 	r.HandleFunc("/oauth/token", a.MCPOAuthToken).Methods(http.MethodPost)
 	r.HandleFunc("/oauth/revoke", a.MCPOAuthRevoke).Methods(http.MethodPost)
 	r.PathPrefix("/mcp").Handler(a.SetupMCP(api.MCPInstructions).HTTPHandler())
-
+	r.PathPrefix("/mcp").Handler(a.SetupMCP(api.MCPInstructions).HTTPHandler())
 	r.HandleFunc("/api/v1/query_range", a.ApiKeyAuth(a.PrometheusQueryRange))
 	r.HandleFunc("/api/v1/series", a.ApiKeyAuth(a.PrometheusSeries))
 	r.HandleFunc("/api/v1/metadata", a.ApiKeyAuth(a.PrometheusMetricMetadata))
