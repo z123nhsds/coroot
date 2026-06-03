@@ -1,0 +1,12 @@
+diff --git a/watchers/deployments_test.go b/watchers/deployments_test.go
+index 63ce0e3..a072e5b 100644
+--- a/watchers/deployments_test.go
++++ b/watchers/deployments_test.go
+@@ -7,7 +7,6 @@ import (
+ 
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+-	"github.com/stretchr/testify/assert"
+ )
+ 
+ func TestCalcDeployments(t *testing.T) {

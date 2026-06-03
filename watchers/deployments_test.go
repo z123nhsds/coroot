@@ -7,7 +7,6 @@ import (
 
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/timeseries"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestCalcDeployments(t *testing.T) {
