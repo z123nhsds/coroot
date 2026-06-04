@@ -1,0 +1,750 @@
+diff --git a/2.5.5.patch b/2.5.5.patch
+new file mode 100644
+index 0000000..e69de29
+diff --git a/regression/regression_test.go b/regression/regression_test.go
+new file mode 100644
+index 0000000..5bd2af3
+--- /dev/null
++++ b/regression/regression_test.go
+@@ -0,0 +1,741 @@
++package regression
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/coroot/coroot/auditor"
++	"github.com/coroot/coroot/db"
++	"github.com/coroot/coroot/model"
++	"github.com/coroot/coroot/prom"
++	"github.com/coroot/coroot/rbac"
++	"github.com/coroot/coroot/timeseries"
++	"github.com/coroot/coroot/utils"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRCASummaryCorrelatesWithSLOAlert(t *testing.T) {
++	t.Run("incident_details_include_rca_summary_when_slo_violation", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "api-gateway"))
++		incident := &model.ApplicationIncident{
++			ApplicationId: app.Id,
++			Key:           "abc12345",
++			OpenedAt:      timeseries.Now(),
++			Severity:      model.CRITICAL,
++			Details: model.IncidentDetails{
++				AvailabilityBurnRates: []model.BurnRate{
++					{
++						LongWindowBurnRate:  14.5,
++						ShortWindowBurnRate: 15.2,
++						Threshold:           14.4,
++						Severity:            model.CRITICAL,
++						LongWindow:          timeseries.Hour,
++						ShortWindow:         5 * timeseries.Minute,
++					},
++				},
++			},
++			RCA: &model.RCA{
++				Status:         "OK",
++				ShortSummary:   "Database connection pool exhaustion causing request failures",
++				RootCause:      "PostgreSQL max_connections reached",
++				ImmediateFixes: "Increase max_connections or add connection pooling",
++			},
++		}
++
++		details := incidentDetails(app, incident)
++
++		assert.NotNil(t, details, "incidentDetails should return non-nil when RCA is present")
++		assert.Equal(t, "Database connection pool exhaustion causing request failures", details.RCASummary,
++			"RCA ShortSummary must propagate to notification details")
++		assert.Equal(t, "Increase max_connections or add connection pooling", details.RCARemediations,
++			"RCA ImmediateFixes must propagate to notification details")
++	})
++
++	t.Run("incident_details_nil_when_no_rca_and_no_reports", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++		incident := &model.ApplicationIncident{
++			ApplicationId: app.Id,
++			Key:           "xyz",
++			OpenedAt:      timeseries.Now(),
++			Severity:      model.WARNING,
++			Details:       model.IncidentDetails{},
++		}
++
++		details := incidentDetails(app, incident)
++		assert.Nil(t, details, "incidentDetails should be nil when no RCA and no failing reports")
++	})
++
++	t.Run("incident_details_excludes_slo_report_checks", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++		report := &model.AuditReport{Name: model.AuditReportSLO}
++		report.Checks = append(report.Checks, &model.Check{
++			Id:      model.Checks.SLOAvailability.Id,
++			Title:   model.Checks.SLOAvailability.Title,
++			Status:  model.CRITICAL,
++			Message: "the app is serving errors",
++		})
++		app.Reports = append(app.Reports, report)
++
++		incident := &model.ApplicationIncident{
++			ApplicationId: app.Id,
++			Key:           "slo-incident",
++			OpenedAt:      timeseries.Now(),
++			Severity:      model.CRITICAL,
++			Details:       model.IncidentDetails{},
++		}
++
++		details := incidentDetails(app, incident)
++		assert.Nil(t, details,
++			"SLO report checks are excluded; with no other failing reports and no RCA, details should be nil")
++	})
++
++	t.Run("incident_details_includes_non_slo_failing_checks_with_rca", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++
++		sloReport := &model.AuditReport{Name: model.AuditReportSLO}
++		sloReport.Checks = append(sloReport.Checks, &model.Check{
++			Id:     model.Checks.SLOAvailability.Id,
++			Title:  model.Checks.SLOAvailability.Title,
++			Status: model.CRITICAL,
++		})
++		app.Reports = append(app.Reports, sloReport)
++
++		memReport := &model.AuditReport{Name: model.AuditReportMemory}
++		memReport.Checks = append(memReport.Checks, &model.Check{
++			Id:      model.Checks.MemoryOOM.Id,
++			Title:   model.Checks.MemoryOOM.Title,
++			Status:  model.WARNING,
++			Message: "3 OOM kills detected",
++		})
++		app.Reports = append(app.Reports, memReport)
++
++		incident := &model.ApplicationIncident{
++			ApplicationId: app.Id,
++			Key:           "mixed-incident",
++			OpenedAt:      timeseries.Now(),
++			Severity:      model.CRITICAL,
++			Details:       model.IncidentDetails{},
++			RCA: &model.RCA{
++				Status:         "OK",
++				ShortSummary:   "Memory pressure causing cascading failures",
++				ImmediateFixes: "Increase memory limits",
++			},
++		}
++
++		details := incidentDetails(app, incident)
++		assert.NotNil(t, details)
++		assert.Equal(t, "Memory pressure causing cascading failures", details.RCASummary)
++
++		var hasSLOCheck, hasOOMCheck bool
++		for _, r := range details.Reports {
++			if r.Name == model.AuditReportSLO {
++				hasSLOCheck = true
++			}
++			if r.Name == model.AuditReportMemory && r.Check == model.Checks.MemoryOOM.Title {
++				hasOOMCheck = true
++			}
++		}
++		assert.False(t, hasSLOCheck, "SLO report checks must be excluded from incident notification details")
++		assert.True(t, hasOOMCheck, "Non-SLO failing checks must be included in incident notification details")
++	})
++
++	t.Run("alert_notification_details_serializes_slo_check_fields", func(t *testing.T) {
++		details := &db.AlertNotificationDetails{
++			ProjectName: "production",
++			RuleName:    "SLO Availability",
++			Severity:    model.CRITICAL.String(),
++			Summary:     "SLOAvailability: the app is serving errors",
++			Details: []model.AlertDetail{
++				{Name: "Description", Value: "Error budget burn rate is 14.5x within 1 hour"},
++			},
++		}
++
++		data, err := json.Marshal(details)
++		assert.NoError(t, err, "AlertNotificationDetails must serialize without error")
++
++		var decoded db.AlertNotificationDetails
++		err = json.Unmarshal(data, &decoded)
++		assert.NoError(t, err, "AlertNotificationDetails must deserialize without error")
++		assert.Equal(t, "SLO Availability", decoded.RuleName)
++		assert.Equal(t, "critical", decoded.Severity)
++		assert.Equal(t, "SLOAvailability: the app is serving errors", decoded.Summary)
++		assert.Len(t, decoded.Details, 1, "SLO alert details should contain Description")
++		assert.Equal(t, "Description", decoded.Details[0].Name)
++	})
++
++	t.Run("slo_burn_rate_format_matches_notification_message", func(t *testing.T) {
++		br := model.BurnRate{
++			LongWindowBurnRate:  14.5,
++			ShortWindowBurnRate: 15.2,
++			Threshold:           14.4,
++			Severity:            model.CRITICAL,
++			LongWindow:          timeseries.Hour,
++			ShortWindow:         5 * timeseries.Minute,
++		}
++
++		statusMsg := br.FormatSLOStatus()
++		assert.Contains(t, statusMsg, "14.5",
++			"BurnRate.FormatSLOStatus must include the burn rate value")
++		assert.Contains(t, statusMsg, "hour",
++			"BurnRate.FormatSLOStatus must include the window unit")
++	})
++
++	t.Run("incident_notification_details_json_roundtrip_preserves_rca", func(t *testing.T) {
++		original := &db.IncidentNotificationDetails{
++			Reports: []db.IncidentNotificationDetailsReport{
++				{Name: model.AuditReportMemory, Check: "Out of memory kills", Message: "3 OOM kills"},
++			},
++			RCASummary:      "Connection pool exhaustion",
++			RCARemediations: "Increase max_connections",
++		}
++
++		data, err := json.Marshal(original)
++		assert.NoError(t, err)
++
++		var decoded db.IncidentNotificationDetails
++		err = json.Unmarshal(data, &decoded)
++		assert.NoError(t, err)
++		assert.Equal(t, original.RCASummary, decoded.RCASummary)
++		assert.Equal(t, original.RCARemediations, decoded.RCARemediations)
++		assert.Len(t, decoded.Reports, 1)
++		assert.Equal(t, model.AuditReportMemory, decoded.Reports[0].Name)
++	})
++
++	t.Run("rca_short_description_prefers_rca_summary", func(t *testing.T) {
++		incident := &model.ApplicationIncident{
++			Severity: model.CRITICAL,
++			Details: model.IncidentDetails{
++				AvailabilityImpact: model.Impact{AffectedRequestPercentage: 5.0},
++				LatencyImpact:      model.Impact{AffectedRequestPercentage: 3.0},
++			},
++			RCA: &model.RCA{
++				Status:       "OK",
++				ShortSummary: "Custom RCA summary",
++			},
++		}
++
++		desc := incident.ShortDescription()
++		assert.Equal(t, "Custom RCA summary", desc,
++			"ShortDescription should prefer RCA.ShortSummary over impact-based description")
++	})
++
++	t.Run("rca_short_description_fallback_to_impact", func(t *testing.T) {
++		incident := &model.ApplicationIncident{
++			Severity: model.CRITICAL,
++			Details: model.IncidentDetails{
++				AvailabilityImpact: model.Impact{AffectedRequestPercentage: 5.0},
++				LatencyImpact:      model.Impact{AffectedRequestPercentage: 3.0},
++			},
++		}
++
++		desc := incident.ShortDescription()
++		assert.Equal(t, "High latency and errors", desc,
++			"ShortDescription should fall back to impact-based description when no RCA")
++	})
++}
++
++func TestMCPServerLogClusteringWithMemoryGrowthPct(t *testing.T) {
++	t.Run("memory_growth_pct_calculation_stability", func(t *testing.T) {
++		rssData := make([]float32, 120)
++		for i := range rssData {
++			rssData[i] = float32(100*1024*1024 + i*1024*1024)
++		}
++		rss := timeseries.NewWithData(0, 30, rssData)
++		limit := float32(512 * 1024 * 1024)
++		to := timeseries.Time(119 * 30)
++
++		pct := auditor.MemoryGrowthPct(rss, limit, to)
++		assert.Greater(t, pct, float32(0),
++			"MemoryGrowthPct should detect growth for steadily increasing RSS")
++	})
++
++	t.Run("memory_growth_pct_no_growth_returns_zero", func(t *testing.T) {
++		rssData := make([]float32, 120)
++		for i := range rssData {
++			rssData[i] = float32(100 * 1024 * 1024)
++		}
++		rss := timeseries.NewWithData(0, 30, rssData)
++		limit := float32(512 * 1024 * 1024)
++		to := timeseries.Time(119 * 30)
++
++		pct := auditor.MemoryGrowthPct(rss, limit, to)
++		assert.Equal(t, float32(0), pct,
++			"MemoryGrowthPct should return 0 for stable RSS (beta<=0)")
++	})
++
++	t.Run("memory_growth_pct_insufficient_data_returns_zero", func(t *testing.T) {
++		rssData := []float32{float32(100 * 1024 * 1024)}
++		rss := timeseries.NewWithData(0, 30, rssData)
++		limit := float32(512 * 1024 * 1024)
++		to := timeseries.Time(0)
++
++		pct := auditor.MemoryGrowthPct(rss, limit, to)
++		assert.Equal(t, float32(0), pct,
++			"MemoryGrowthPct should return 0 for insufficient data points (< 10)")
++	})
++
++	t.Run("memory_growth_pct_too_many_nans_returns_zero", func(t *testing.T) {
++		rssData := make([]float32, 120)
++		for i := range rssData {
++			if i%3 == 0 {
++				rssData[i] = float32(100*1024*1024 + i*1024*1024)
++			} else {
++				rssData[i] = timeseries.NaN
++			}
++		}
++		rss := timeseries.NewWithData(0, 30, rssData)
++		limit := float32(512 * 1024 * 1024)
++		to := timeseries.Time(119 * 30)
++
++		pct := auditor.MemoryGrowthPct(rss, limit, to)
++		assert.Equal(t, float32(0), pct,
++			"MemoryGrowthPct should return 0 when >20% of data points are NaN")
++	})
++
++	t.Run("memory_growth_pct_drop_resets_detection", func(t *testing.T) {
++		rssData := make([]float32, 120)
++		for i := 0; i < 60; i++ {
++			rssData[i] = float32(100*1024*1024 + i*2*1024*1024)
++		}
++		for i := 60; i < 120; i++ {
++			rssData[i] = float32(50*1024*1024 + (i-60)*1024*1024)
++		}
++		rss := timeseries.NewWithData(0, 30, rssData)
++		limit := float32(1024 * 1024 * 1024)
++		to := timeseries.Time(119 * 30)
++
++		pct := auditor.MemoryGrowthPct(rss, limit, to)
++		assert.Greater(t, pct, float32(0),
++			"MemoryGrowthPct should detect growth in the longest continuous segment after a drop")
++	})
++
++	t.Run("memory_growth_pct_empty_series_returns_zero", func(t *testing.T) {
++		rss := timeseries.New(0, 30, 30)
++		limit := float32(512 * 1024 * 1024)
++		to := timeseries.Time(29 * 30)
++
++		pct := auditor.MemoryGrowthPct(rss, limit, to)
++		assert.Equal(t, float32(0), pct,
++			"MemoryGrowthPct should return 0 for empty time series")
++	})
++
++	t.Run("rbac_permissions_gate_mcp_log_access", func(t *testing.T) {
++		viewerRole := rbac.Roles[2]
++		assert.Equal(t, rbac.RoleViewer, viewerRole.Name)
++
++		logAction := rbac.Actions.Project("proj1").Logs().View()
++		assert.True(t, viewerRole.Permissions.Allows(logAction),
++			"Viewer role should allow viewing logs via MCP")
++
++		editAction := rbac.Actions.Project("proj1").Integrations().Edit()
++		assert.False(t, viewerRole.Permissions.Allows(editAction),
++			"Viewer role should NOT allow editing integrations")
++	})
++
++	t.Run("rbac_admin_has_full_mcp_access", func(t *testing.T) {
++		adminRole := rbac.Roles[0]
++		assert.Equal(t, rbac.RoleAdmin, adminRole.Name)
++
++		allActions := rbac.Actions.List()
++		for _, action := range allActions {
++			assert.True(t, adminRole.Permissions.Allows(action),
++				"Admin should be allowed all actions, failed for scope=%s verb=%s", action.Scope, action.Action)
++		}
++	})
++
++	t.Run("rbac_editor_can_view_logs_but_not_edit_integrations", func(t *testing.T) {
++		editorRole := rbac.Roles[1]
++		assert.Equal(t, rbac.RoleEditor, editorRole.Name)
++
++		logAction := rbac.Actions.Project("proj1").Logs().View()
++		assert.True(t, editorRole.Permissions.Allows(logAction),
++			"Editor should be able to view logs")
++
++		integrationEditAction := rbac.Actions.Project("proj1").Integrations().Edit()
++		assert.False(t, editorRole.Permissions.Allows(integrationEditAction),
++			"Editor should NOT be able to edit integrations")
++	})
++
++	t.Run("rbac_permission_uses_glob_match_for_node_scopes", func(t *testing.T) {
++		ps := rbac.PermissionSet{
++			rbac.NewPermission(rbac.ScopeNode, rbac.ActionView, rbac.Object{"node_name": "worker-*"}),
++		}
++		assert.True(t, ps.Allows(rbac.Actions.Project("p1").Node("worker-01").View()),
++			"Permission with 'worker-*' should match 'worker-01'")
++		assert.False(t, ps.Allows(rbac.Actions.Project("p1").Node("master-01").View()),
++			"Permission with 'worker-*' should NOT match 'master-01'")
++	})
++
++	t.Run("deployment_status_links_to_memory_audit", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "svc"))
++		instance := app.GetOrCreateInstance("svc-pod-1", nil)
++		instance.Pod = &model.Pod{ReplicaSet: "svc-abc123"}
++		container := &model.Container{
++			Name:        "main",
++			MemoryRss:   timeseries.NewWithData(0, 30, makeMonotonicRSS(50, 150, 120)),
++			MemoryLimit: timeseries.NewWithData(0, 30, makeConstTS(256*1024*1024, 120)),
++		}
++		instance.Containers["main"] = container
++
++		now := timeseries.Now()
++		statuses := model.CalcApplicationDeploymentStatuses(app, model.CheckConfigs{}, now)
++
++		leakPct := auditor.MemoryGrowthPct(
++			container.MemoryRss,
++			float32(256*1024*1024),
++			timeseries.Time(119*30),
++		)
++
++		if len(statuses) > 0 {
++			assert.Greater(t, leakPct, float32(0),
++				"When deployments exist and memory grows, MemoryGrowthPct should be positive")
++		}
++	})
++}
++
++func TestUtilsGlobMatchDoesNotBreakWatchersPromHealthCheck(t *testing.T) {
++	t.Run("glob_match_used_by_alerting_rule_matches", func(t *testing.T) {
++		rule := &model.AlertingRule{
++			Selector: model.AppSelector{
++				Type:                  model.AppSelectorTypeApplications,
++				ApplicationIdPatterns: []string{"default:Deployment:*"},
++			},
++		}
++
++		matchingApp := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "web"))
++		assert.True(t, rule.Matches(matchingApp),
++			"AlertingRule.Matches should match app when GlobMatch pattern matches")
++
++		nonMatchingApp := model.NewApplication(model.NewApplicationId("c1", "kube-system", model.ApplicationKindDeployment, "coredns"))
++		assert.False(t, rule.Matches(nonMatchingApp),
++			"AlertingRule.Matches should not match app when GlobMatch pattern doesn't match")
++	})
++
++	t.Run("glob_match_wildcard_all_matches_every_app", func(t *testing.T) {
++		rule := &model.AlertingRule{
++			Selector: model.AppSelector{
++				Type: model.AppSelectorTypeAll,
++			},
++		}
++
++		app1 := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "web"))
++		app2 := model.NewApplication(model.NewApplicationId("c1", "kube-system", model.ApplicationKindStatefulSet, "postgres"))
++		assert.True(t, rule.Matches(app1))
++		assert.True(t, rule.Matches(app2))
++	})
++
++	t.Run("glob_match_category_selector", func(t *testing.T) {
++		rule := &model.AlertingRule{
++			Selector: model.AppSelector{
++				Type:       model.AppSelectorTypeCategory,
++				Categories: []string{"application"},
++			},
++		}
++
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "web"))
++		app.Category = model.ApplicationCategoryApplication
++		assert.True(t, rule.Matches(app))
++
++		infraApp := model.NewApplication(model.NewApplicationId("c1", "kube-system", model.ApplicationKindDeployment, "coredns"))
++		infraApp.Category = model.ApplicationCategoryControlPlane
++		assert.False(t, rule.Matches(infraApp))
++	})
++
++	t.Run("glob_validate_rejects_invalid_patterns", func(t *testing.T) {
++		assert.True(t, utils.GlobValidate([]string{"default:Deployment:*"}),
++			"Valid glob pattern should pass validation")
++		assert.True(t, utils.GlobValidate([]string{"*"}),
++			"Wildcard pattern should pass validation")
++		assert.False(t, utils.GlobValidate([]string{"[invalid"}),
++			"Invalid glob pattern should fail validation")
++	})
++
++	t.Run("glob_match_edge_cases_for_application_ids", func(t *testing.T) {
++		assert.True(t, utils.GlobMatch("default:Deployment:web", "default:Deployment:*"),
++			"Trailing wildcard should match")
++		assert.True(t, utils.GlobMatch("default:Deployment:web", "*"),
++			"Global wildcard should match any string")
++		assert.False(t, utils.GlobMatch("default:Deployment:web", "kube-system:Deployment:*"),
++			"Different namespace should not match")
++		assert.True(t, utils.GlobMatch("default:Deployment:web", "default:Deployment:web"),
++			"Exact match should work")
++		assert.False(t, utils.GlobMatch("default:Deployment:web", "default:Deployment:api"),
++			"Different name should not match")
++	})
++
++	t.Run("glob_match_matches_alerts_using_string_without_cluster_id", func(t *testing.T) {
++		rule := &model.AlertingRule{
++			Selector: model.AppSelector{
++				Type:                  model.AppSelectorTypeApplications,
++				ApplicationIdPatterns: []string{"default:Deployment:api-*"},
++			},
++		}
++
++		alert := &model.Alert{
++			ApplicationId:       model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "api-gateway"),
++			ApplicationCategory: model.ApplicationCategoryApplication,
++		}
++		assert.True(t, rule.MatchesAlert(alert),
++			"MatchesAlert should use StringWithoutClusterId for glob matching")
++
++		alert2 := &model.Alert{
++			ApplicationId:       model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "web-frontend"),
++			ApplicationCategory: model.ApplicationCategoryApplication,
++		}
++		assert.False(t, rule.MatchesAlert(alert2),
++			"MatchesAlert should not match non-matching application name")
++	})
++
++	t.Run("prom_client_creation_from_config", func(t *testing.T) {
++		promConfig := &db.IntegrationPrometheus{
++			Url:             "http://prometheus:9090",
++			RefreshInterval: timeseries.Minute * 30,
++		}
++
++		client, err := prom.NewClient(promConfig, nil)
++		assert.NoError(t, err, "Creating prom client from valid config should not error")
++		assert.NotNil(t, client, "Client should not be nil")
++		client.Close()
++	})
++
++	t.Run("prom_client_nil_config_returns_error", func(t *testing.T) {
++		client, err := prom.NewClient(nil, nil)
++		assert.Error(t, err, "Creating prom client from nil config should return error")
++		assert.Nil(t, client, "Client should be nil on error")
++	})
++
++	t.Run("prom_client_empty_url_returns_error", func(t *testing.T) {
++		promConfig := &db.IntegrationPrometheus{
++			Url:             "",
++			RefreshInterval: timeseries.Minute * 30,
++		}
++		client, err := prom.NewClient(promConfig, nil)
++		assert.Error(t, err, "Creating prom client with empty URL should return error")
++		assert.Nil(t, client)
++	})
++
++	t.Run("alerting_rule_matches_propagates_to_alert_matching", func(t *testing.T) {
++		rule := &model.AlertingRule{
++			Id:        "slo-availability-rule",
++			Name:      "SLO Availability",
++			Source:     model.AlertSource{Type: model.AlertSourceTypeCheck, Check: &model.CheckSource{CheckId: model.Checks.SLOAvailability.Id}},
++			Selector:  model.AppSelector{Type: model.AppSelectorTypeApplications, ApplicationIdPatterns: []string{"default:Deployment:api-*"}},
++			Severity:  model.CRITICAL,
++			Enabled:   true,
++			Templates: model.AlertTemplates{Description: "SLO violation detected"},
++		}
++
++		apiApp := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "api-gateway"))
++		assert.True(t, rule.Matches(apiApp),
++			"Rule with pattern 'default:Deployment:api-*' should match 'api-gateway'")
++
++		webApp := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "web-frontend"))
++		assert.False(t, rule.Matches(webApp),
++			"Rule with pattern 'default:Deployment:api-*' should NOT match 'web-frontend'")
++	})
++
++	t.Run("filter_alert_details_removes_promql_fields", func(t *testing.T) {
++		details := []model.AlertDetail{
++			{Name: "Description", Value: "SLO violation"},
++			{Name: "PromQL", Value: "rate(http_requests_total[5m])"},
++			{Name: "PromQLChart", Value: "rate(http_requests_total{job=\"api\"}[5m])"},
++			{Name: "Labels", Value: "job=api"},
++		}
++
++		filtered := filterAlertDetails(details)
++		assert.Len(t, filtered, 2, "Should filter out PromQL and PromQLChart details")
++		assert.Equal(t, "Description", filtered[0].Name)
++		assert.Equal(t, "Labels", filtered[1].Name)
++	})
++
++	t.Run("glob_match_multiple_patterns_any_match", func(t *testing.T) {
++		assert.True(t, utils.GlobMatch("default:Deployment:web", "kube-system:*", "default:Deployment:*"),
++			"GlobMatch should return true if any pattern matches")
++		assert.False(t, utils.GlobMatch("default:Deployment:web", "kube-system:*", "monitoring:*"),
++			"GlobMatch should return false if no pattern matches")
++	})
++}
++
++func TestCrossModuleSLOToNotificationEndToEnd(t *testing.T) {
++	t.Run("slo_violation_to_incident_notification_chain", func(t *testing.T) {
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "payment"))
++		app.Category = model.ApplicationCategoryApplication
++
++		sloReport := &model.AuditReport{Name: model.AuditReportSLO}
++		sloReport.Checks = append(sloReport.Checks, &model.Check{
++			Id:      model.Checks.SLOAvailability.Id,
++			Title:   model.Checks.SLOAvailability.Title,
++			Status:  model.CRITICAL,
++			Message: "the app is serving errors",
++		})
++		app.Reports = append(app.Reports, sloReport)
++
++		memReport := &model.AuditReport{Name: model.AuditReportMemory}
++		memReport.Checks = append(memReport.Checks, &model.Check{
++			Id:      model.Checks.MemoryOOM.Id,
++			Title:   model.Checks.MemoryOOM.Title,
++			Status:  model.WARNING,
++			Message: "2 OOM kills detected",
++		})
++		app.Reports = append(app.Reports, memReport)
++
++		incident := &model.ApplicationIncident{
++			ApplicationId: app.Id,
++			Key:           "pay-incident",
++			OpenedAt:      timeseries.Now(),
++			Severity:      model.CRITICAL,
++			Details: model.IncidentDetails{
++				AvailabilityBurnRates: []model.BurnRate{
++					{
++						LongWindowBurnRate:  14.5,
++						ShortWindowBurnRate: 15.2,
++						Threshold:           14.4,
++						Severity:            model.CRITICAL,
++						LongWindow:          timeseries.Hour,
++						ShortWindow:         5 * timeseries.Minute,
++					},
++				},
++				AvailabilityImpact: model.Impact{AffectedRequestPercentage: 5.0},
++			},
++			RCA: &model.RCA{
++				Status:         "OK",
++				ShortSummary:   "Database connection pool exhaustion",
++				ImmediateFixes: "Increase max_connections",
++			},
++		}
++
++		details := incidentDetails(app, incident)
++		assert.NotNil(t, details)
++		assert.Equal(t, "Database connection pool exhaustion", details.RCASummary)
++		assert.Equal(t, "Increase max_connections", details.RCARemediations)
++
++		var hasSLOReport, hasOOMReport bool
++		for _, r := range details.Reports {
++			if r.Name == model.AuditReportSLO {
++				hasSLOReport = true
++			}
++			if r.Name == model.AuditReportMemory && r.Check == model.Checks.MemoryOOM.Title {
++				hasOOMReport = true
++			}
++		}
++		assert.False(t, hasSLOReport,
++			"SLO report checks must be excluded from incident notification details")
++		assert.True(t, hasOOMReport,
++			"Non-SLO failing checks must be included in incident notification details")
++	})
++
++	t.Run("alert_notification_details_roundtrip_with_slo_alert", func(t *testing.T) {
++		original := &db.AlertNotificationDetails{
++			ProjectName: "production",
++			RuleName:    "SLO Availability",
++			Severity:    "critical",
++			Summary:     "SLOAvailability: the app is serving errors",
++			Details: []model.AlertDetail{
++				{Name: "Description", Value: "Error budget burn rate is 14.5x within 1 hour"},
++				{Name: "Labels", Value: "job=payment"},
++			},
++			Duration: "2h",
++		}
++
++		data, err := json.Marshal(original)
++		assert.NoError(t, err)
++
++		var decoded db.AlertNotificationDetails
++		err = json.Unmarshal(data, &decoded)
++		assert.NoError(t, err)
++		assert.Equal(t, original.RuleName, decoded.RuleName)
++		assert.Equal(t, original.Severity, decoded.Severity)
++		assert.Equal(t, original.Summary, decoded.Summary)
++		assert.Equal(t, original.Duration, decoded.Duration)
++		assert.Len(t, decoded.Details, 2)
++	})
++
++	t.Run("glob_match_chain_from_rbac_to_alerting_to_watchers", func(t *testing.T) {
++		rule := &model.AlertingRule{
++			Id:       "memory-leak-rule",
++			Name:     "Memory Leak",
++			Source:    model.AlertSource{Type: model.AlertSourceTypeCheck, Check: &model.CheckSource{CheckId: model.Checks.MemoryLeakPercent.Id}},
++			Selector: model.AppSelector{Type: model.AppSelectorTypeApplications, ApplicationIdPatterns: []string{"default:Deployment:*"}},
++			Severity: model.WARNING,
++			Enabled:  true,
++		}
++
++		app := model.NewApplication(model.NewApplicationId("c1", "default", model.ApplicationKindDeployment, "leaky-app"))
++		instance := app.GetOrCreateInstance("leaky-app-pod", nil)
++		instance.Pod = &model.Pod{ReplicaSet: "leaky-app-abc123"}
++		container := &model.Container{
++			Name:        "main",
++			MemoryRss:   timeseries.NewWithData(0, 30, makeMonotonicRSS(100, 200, 120)),
++			MemoryLimit: timeseries.NewWithData(0, 30, makeConstTS(512*1024*1024, 120)),
++		}
++		instance.Containers["main"] = container
++
++		assert.True(t, rule.Matches(app),
++			"AlertingRule must match the app via GlobMatch on ApplicationIdPatterns")
++
++		leakPct := auditor.MemoryGrowthPct(
++			container.MemoryRss,
++			float32(512*1024*1024),
++			timeseries.Time(119*30),
++		)
++		assert.Greater(t, leakPct, float32(0),
++			"MemoryGrowthPct must detect leak for the container")
++
++		viewerPerms := rbac.Roles[2].Permissions
++		viewAction := rbac.Actions.Project("proj1").Application(
++			model.ApplicationCategoryApplication, "default", model.ApplicationKindDeployment, "leaky-app",
++		).View()
++		assert.True(t, viewerPerms.Allows(viewAction),
++			"Viewer should be able to view the application for alert inspection")
++	})
++}
++
++func incidentDetails(app *model.Application, incident *model.ApplicationIncident) *db.IncidentNotificationDetails {
++	var reports []db.IncidentNotificationDetailsReport
++	if !incident.Resolved() {
++		for _, r := range app.Reports {
++			for _, ch := range r.Checks {
++				if r.Name == model.AuditReportSLO || ch.Status < model.WARNING {
++					continue
++				}
++				reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
++			}
++		}
++	}
++	if len(reports) == 0 && incident.RCA == nil {
++		return nil
++	}
++	details := &db.IncidentNotificationDetails{Reports: reports}
++	if rca := incident.RCA; rca != nil && rca.Status == "OK" {
++		details.RCASummary = rca.ShortSummary
++		details.RCARemediations = rca.ImmediateFixes
++	}
++	return details
++}
++
++func filterAlertDetails(details []model.AlertDetail) []model.AlertDetail {
++	var filtered []model.AlertDetail
++	for _, d := range details {
++		if d.Name == "PromQL" || d.Name == "PromQLChart" {
++			continue
++		}
++		filtered = append(filtered, d)
++	}
++	return filtered
++}
++
++func makeConstTS(val float32, length int) []float32 {
++	data := make([]float32, length)
++	for i := range data {
++		data[i] = val
++	}
++	return data
++}
++
++func makeMonotonicRSS(startMB, endMB float32, length int) []float32 {
++	data := make([]float32, length)
++	for i := range data {
++		data[i] = (startMB + (endMB-startMB)*float32(i)/float32(length-1)) * 1024 * 1024
++	}
++	return data
++}
