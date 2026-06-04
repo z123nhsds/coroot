@@ -75,12 +75,11 @@ func addPostgresConnectTimeout(dsn string) (string, error) {
 		}
 		u.RawQuery = q.Encode()
 		return u.String(), nil
-	} else {
-		if !strings.Contains(dsn, "connect_timeout=") {
-			dsn += " connect_timeout=" + defaultPostgresTimeoutSecond
-		}
-		return dsn, nil
 	}
+	if !strings.Contains(dsn, "connect_timeout=") {
+		dsn += " connect_timeout=" + defaultPostgresTimeoutSecond
+	}
+	return dsn, nil
 }
 
 func (db *DB) Type() Type {
@@ -121,6 +120,7 @@ func (db *DB) Migrate(extraTables ...Table) error {
 		&User{},
 		&AlertingRule{},
 		&Alert{},
+		&ServiceIsolationRecord{},
 	}
 	return db.Migrator().Migrate(append(defaultTables, extraTables...)...)
 }
@@ -174,8 +174,7 @@ func NewMigrator(t Type, db *DB) *Migrator {
 
 func (m *Migrator) Migrate(tables ...Table) error {
 	for _, t := range tables {
-		err := t.Migrate(m)
-		if err != nil {
+		if err := t.Migrate(m); err != nil {
 			return err
 		}
 	}

@@ -18,12 +18,9 @@ type Teams struct {
 }
 
 func NewTeams(webhookUrl string) *Teams {
-	var client = goteamsnotify.NewTeamsClient()
+	client := goteamsnotify.NewTeamsClient()
 	client.SkipWebhookURLValidationOnSend(true)
-	return &Teams{
-		webhookUrl: webhookUrl,
-		client:     client,
-	}
+	return &Teams{webhookUrl: webhookUrl, client: client}
 }
 
 func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
@@ -56,22 +53,19 @@ func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
 	if err != nil {
 		return err
 	}
-	err = card.AddAction(true, action)
-	if err != nil {
+	if err = card.AddAction(true, action); err != nil {
 		return err
 	}
 	msg, err := adaptivecard.NewMessageFromCard(card)
 	if err != nil {
 		return err
 	}
-	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
-		return err
-	}
-	return nil
+	return t.client.SendWithContext(ctx, t.webhookUrl, msg)
 }
 
 func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
 	displayName := alertDisplayName(n)
+	url := alertNotificationUrl(baseUrl, n)
 	var title string
 	if n.Status == model.OK {
 		resolvedText := "resolved"
@@ -84,24 +78,13 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
 			title = fmt.Sprintf("**%s** alert %s", displayName, resolvedText)
 		}
 	} else {
-		title = fmt.Sprintf("[%s] **%s**: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary)
+		summary := "alert fired"
+		if n.Details != nil && n.Details.Summary != "" {
+			summary = n.Details.Summary
+		}
+		title = fmt.Sprintf("[%s] **%s**: %s", strings.ToUpper(n.Status.String()), displayName, summary)
 	}
-	text := ""
-	if n.Details != nil {
-		if n.Details.ProjectName != "" {
-			text += fmt.Sprintf("**Project**: %s\n\n", n.Details.ProjectName)
-		}
-		if n.Details.RuleName != "" {
-			text += fmt.Sprintf("**Alerting rule**: %s\n\n", n.Details.RuleName)
-		}
-		for _, d := range n.Details.Details {
-			if d.Code {
-				text += fmt.Sprintf("**%s**:\n```\n%s\n```\n\n", d.Name, d.Value)
-			} else {
-				text += fmt.Sprintf("**%s**: %s\n\n", d.Name, d.Value)
-			}
-		}
-	}
+	text := alertMarkdownDetails(n)
 	if text == "" {
 		text = " "
 	}
@@ -109,22 +92,18 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
 	if err != nil {
 		return err
 	}
-	action, err := adaptivecard.NewActionOpenURL(alertUrl(baseUrl, n), "View alert")
+	action, err := adaptivecard.NewActionOpenURL(url, "View alert")
 	if err != nil {
 		return err
 	}
-	err = card.AddAction(true, action)
-	if err != nil {
+	if err = card.AddAction(true, action); err != nil {
 		return err
 	}
 	msg, err := adaptivecard.NewMessageFromCard(card)
 	if err != nil {
 		return err
 	}
-	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
-		return err
-	}
-	return nil
+	return t.client.SendWithContext(ctx, t.webhookUrl, msg)
 }
 
 func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
@@ -141,7 +120,6 @@ func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds mode
 	}
 
 	title := fmt.Sprintf("Deployment of **%s** to **%s**", d.ApplicationId.Name, project.Name)
-
 	text := fmt.Sprintf("**Status**: %s\n\n", status)
 	text += fmt.Sprintf("**Version**: %s\n\n", d.Version())
 	if ds.State == model.ApplicationDeploymentStateSummary {
@@ -165,17 +143,12 @@ func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds mode
 	if err != nil {
 		return err
 	}
-	err = card.AddAction(true, action)
-	if err != nil {
+	if err = card.AddAction(true, action); err != nil {
 		return err
 	}
 	msg, err := adaptivecard.NewMessageFromCard(card)
 	if err != nil {
 		return err
 	}
-	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
-		return err
-	}
-
-	return nil
+	return t.client.SendWithContext(ctx, t.webhookUrl, msg)
 }

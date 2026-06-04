@@ -8,92 +8,112 @@ import (
 	"github.com/PagerDuty/go-pagerduty"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
-	"github.com/coroot/coroot/utils"
 )
 
 type Pagerduty struct {
-	integrationKey string
+	client     *pagerduty.V2EventsAPIClient
+	routingKey string
 }
 
 func NewPagerduty(integrationKey string) *Pagerduty {
-	return &Pagerduty{integrationKey: integrationKey}
+	return &Pagerduty{client: pagerduty.NewV2EventsAPIClient(integrationKey), routingKey: integrationKey}
 }
 
 func (pd *Pagerduty) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
-	e := pagerduty.V2Event{
-		RoutingKey: pd.integrationKey,
-		DedupKey:   n.ExternalKey,
+	action := "trigger"
+	body := &pagerduty.V2Event{
+		RoutingKey: pd.routingKey,
+		Action:     action,
+		DedupKey:   n.IncidentKey,
+		Payload: &pagerduty.V2Payload{
+			Summary:   n.ApplicationId.Name + " is not meeting its SLOs",
+			Source:    n.ApplicationId.Name,
+			Severity:  strings.ToLower(n.Status.String()),
+			Timestamp: pagerduty.APIIncidentTimestamp(n.Timestamp.ToStandard()),
+			Class:     n.ApplicationId.String(),
+			Group:     n.ProjectId.String(),
+			Component: n.ApplicationId.Name,
+		},
+		Links: []pagerduty.Link{{Href: incidentUrl(baseUrl, n), Text: n.ApplicationId.Name}},
+	}
+	if n.Details != nil {
+		for _, r := range n.Details.Reports {
+			body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{r.Name + " / " + r.Check: r.Message})
+		}
+		if n.Details.RCASummary != "" {
+			body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{"Root Cause": n.Details.RCASummary})
+		}
+		if n.Details.RCARemediations != "" {
+			body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{"Remediations": n.Details.RCARemediations})
+		}
 	}
 	if n.Status == model.OK {
-		e.Action = "resolve"
-	} else {
-		e.Action = "trigger"
-		e.Client = "Coroot"
-		e.ClientURL = incidentUrl(baseUrl, n)
-		e.Payload = &pagerduty.V2Payload{
-			Summary:   fmt.Sprintf("[%s] %s is not meeting its SLOs", strings.ToUpper(n.Status.String()), n.ApplicationId.Name),
-			Source:    "Coroot",
-			Severity:  n.Status.String(),
-			Timestamp: n.Timestamp.ToStandard().String(),
-		}
-		if n.Details != nil {
-			details := map[string]string{}
-			for _, r := range n.Details.Reports {
-				details[fmt.Sprintf("%s / %s", r.Name, r.Check)] = r.Message
-			}
-			if n.Details.RCASummary != "" {
-				details["Root Cause"] = n.Details.RCASummary
-			}
-			if n.Details.RCARemediations != "" {
-				details["Remediations"] = utils.Truncate(n.Details.RCARemediations, 2000)
-			}
-			if len(details) > 0 {
-				e.Payload.Details = details
-			}
-		}
+		action = "resolve"
+		body.Payload.Severity = "info"
+		body.Payload.Summary = n.ApplicationId.Name + " incident resolved"
 	}
-	_, err := pagerduty.ManageEventWithContext(ctx, e)
-	return err
+	if action == "resolve" && body.DedupKey == "" {
+		return nil
+	}
+	res, err := pd.client.ManageEventWithContext(ctx, body)
+	if err != nil {
+		return err
+	}
+	n.ExternalKey = res.DedupKey
+	return nil
 }
 
 func (pd *Pagerduty) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
-	e := pagerduty.V2Event{
-		RoutingKey: pd.integrationKey,
+	action := "trigger"
+	displayName := alertDisplayName(n)
+	summary := displayName + " alert fired"
+	severity := strings.ToLower(n.Status.String())
+	if n.Details != nil && n.Details.Summary != "" {
+		summary = n.Details.Summary
+	}
+	body := &pagerduty.V2Event{
+		RoutingKey: pd.routingKey,
+		Action:     action,
 		DedupKey:   n.ExternalKey,
+		Payload: &pagerduty.V2Payload{
+			Summary:   summary,
+			Source:    displayName,
+			Severity:  severity,
+			Timestamp: pagerduty.APIIncidentTimestamp(n.Timestamp.ToStandard()),
+			Class:     n.ApplicationId.String(),
+			Group:     n.ProjectId.String(),
+			Component: displayName,
+		},
+		Links: []pagerduty.Link{{Href: alertNotificationUrl(baseUrl, n), Text: displayName}},
+	}
+	for k, v := range alertMapDetails(n) {
+		body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{k: v})
 	}
 	if n.Status == model.OK {
-		e.Action = "resolve"
-	} else {
-		e.Action = "trigger"
-		e.Client = "Coroot"
-		e.ClientURL = alertUrl(baseUrl, n)
-		displayName := alertDisplayName(n)
-		e.Payload = &pagerduty.V2Payload{
-			Summary:   fmt.Sprintf("[%s] %s: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary),
-			Source:    "Coroot",
-			Severity:  n.Status.String(),
-			Timestamp: n.Timestamp.ToStandard().String(),
+		action = "resolve"
+		body.Action = action
+		body.Payload.Severity = "info"
+		resolvedText := "resolved"
+		if n.Details != nil && n.Details.ResolvedBy != "" {
+			resolvedText = fmt.Sprintf("manually resolved by %s", n.Details.ResolvedBy)
 		}
-		if n.Details != nil {
-			details := map[string]string{}
-			if n.Details.ProjectName != "" {
-				details["Project"] = n.Details.ProjectName
-			}
-			if n.Details.RuleName != "" {
-				details["Alerting rule"] = n.Details.RuleName
-			}
-			for _, d := range n.Details.Details {
-				details[d.Name] = d.Value
-			}
-			if len(details) > 0 {
-				e.Payload.Details = details
-			}
+		if n.Details != nil && n.Details.Duration != "" {
+			body.Payload.Summary = fmt.Sprintf("%s alert %s (duration: %s)", displayName, resolvedText, n.Details.Duration)
+		} else {
+			body.Payload.Summary = fmt.Sprintf("%s alert %s", displayName, resolvedText)
 		}
 	}
-	_, err := pagerduty.ManageEventWithContext(ctx, e)
-	return err
+	if action == "resolve" && body.DedupKey == "" {
+		return nil
+	}
+	res, err := pd.client.ManageEventWithContext(ctx, body)
+	if err != nil {
+		return err
+	}
+	n.ExternalKey = res.DedupKey
+	return nil
 }
 
-func (pd *Pagerduty) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
-	return fmt.Errorf("not supported")
+func (pd *Pagerduty) SendDeployment(ctx context.Context, _ *db.Project, ds model.ApplicationDeploymentStatus) error {
+	return nil
 }

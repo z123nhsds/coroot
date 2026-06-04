@@ -3,6 +3,7 @@ package watchers
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -18,7 +19,10 @@ import (
 )
 
 const (
-	sendTimeout = 30 * time.Second
+	sendTimeout                     = 30 * time.Second
+	autoIsolationSampleThreshold    = 3
+	autoIsolationMinMemoryGrowthPct = 50
+	autoIsolationRelativeIncrease   = 1.5
 )
 
 type Deployments struct {
@@ -34,6 +38,7 @@ func (w *Deployments) Check(project *db.Project, world *model.World) {
 	start := time.Now()
 	apps := w.discoverAndSaveDeployments(project, world)
 	w.snapshotDeploymentMetrics(project, world)
+	w.processMemoryLeakIsolations(project, world)
 	w.sendNotifications(project, world)
 	klog.Infof("%s: checked %d apps in %s", project.Id, apps, time.Since(start).Truncate(time.Millisecond))
 }
@@ -93,6 +98,134 @@ func (w *Deployments) snapshotDeploymentMetrics(project *db.Project, world *mode
 			}
 		}
 	}
+}
+
+func (w *Deployments) processMemoryLeakIsolations(project *db.Project, world *model.World) {
+	now := world.Ctx.To
+	for _, app := range world.Applications {
+		if app.Id.Kind != model.ApplicationKindDeployment {
+			continue
+		}
+		current, previous := deploymentPair(app)
+		if current == nil || previous == nil || previous.MetricsSnapshot == nil {
+			continue
+		}
+		currentGrowth := currentMemoryGrowthPct(app, now)
+		previousGrowth := previous.MetricsSnapshot.MemoryLeakPercent
+		threshold := previousGrowth * autoIsolationRelativeIncrease
+		if threshold < autoIsolationMinMemoryGrowthPct {
+			threshold = autoIsolationMinMemoryGrowthPct
+		}
+		record, err := w.getServiceIsolationRecord(project.Id, app, current, previous, threshold)
+		if err != nil {
+			klog.Errorln(err)
+			continue
+		}
+		record.CurrentVersion = current.Version()
+		record.PreviousVersion = previous.Version()
+		record.CurrentMemoryGrowthPct = currentGrowth
+		record.PreviousMemoryGrowthPct = previousGrowth
+		record.ThresholdMemoryGrowthPct = threshold
+		record.LastObservedAt = now
+		record.Details = notifications.BuildIsolationRecordDetails(app)
+
+		if currentGrowth <= threshold {
+			if record.IsolatedAt.IsZero() && record.ConsecutiveSamples > 0 {
+				record.ConsecutiveSamples = 0
+				record.FirstDetectedAt = 0
+				record.IsolationStatus = "cleared"
+				if err := w.db.SaveServiceIsolationRecord(record); err != nil {
+					klog.Errorln(err)
+				}
+			}
+			continue
+		}
+
+		if record.ConsecutiveSamples == 0 || record.FirstDetectedAt.IsZero() {
+			record.FirstDetectedAt = now
+		}
+		record.ConsecutiveSamples++
+		if !record.IsolatedAt.IsZero() {
+			record.IsolationStatus = "isolated"
+			if err := w.db.SaveServiceIsolationRecord(record); err != nil {
+				klog.Errorln(err)
+			}
+			continue
+		}
+		record.IsolationStatus = "pending"
+		if record.ConsecutiveSamples < autoIsolationSampleThreshold {
+			if err := w.db.SaveServiceIsolationRecord(record); err != nil {
+				klog.Errorln(err)
+			}
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+		err = notifications.ExecuteIsolation(ctx, project, record)
+		cancel()
+		if err != nil {
+			record.IsolationStatus = "failed"
+			if saveErr := w.db.SaveServiceIsolationRecord(record); saveErr != nil {
+				klog.Errorln(saveErr)
+			}
+			klog.Errorf("failed to isolate %s: %s", app.Id, err)
+			continue
+		}
+		record.IsolatedAt = now
+		record.IsolationStatus = "isolated"
+		notifications.EnqueueIsolationAlert(w.db, project, app, record, now)
+		record.NotificationEnqueuedAt = now
+		if err := w.db.SaveServiceIsolationRecord(record); err != nil {
+			klog.Errorln(err)
+		}
+	}
+}
+
+func (w *Deployments) getServiceIsolationRecord(projectId db.ProjectId, app *model.Application, current, previous *model.ApplicationDeployment, threshold float32) (*db.ServiceIsolationRecord, error) {
+	record, err := w.db.GetServiceIsolationRecord(projectId, app.Id, current.Id())
+	if err == nil {
+		return record, nil
+	}
+	if !errors.Is(err, db.ErrNotFound) {
+		return nil, err
+	}
+	return &db.ServiceIsolationRecord{
+		ProjectId:               projectId,
+		ApplicationId:           app.Id,
+		DeploymentId:            current.Id(),
+		CurrentVersion:          current.Version(),
+		PreviousVersion:         previous.Version(),
+		CurrentMemoryGrowthPct:  0,
+		PreviousMemoryGrowthPct: previous.MetricsSnapshot.MemoryLeakPercent,
+		ThresholdMemoryGrowthPct: threshold,
+		IsolationStatus:         "observing",
+	}, nil
+}
+
+func deploymentPair(app *model.Application) (*model.ApplicationDeployment, *model.ApplicationDeployment) {
+	if len(app.Deployments) < 2 {
+		return nil, nil
+	}
+	current := app.Deployments[len(app.Deployments)-1]
+	for i := len(app.Deployments) - 2; i >= 0; i-- {
+		previous := app.Deployments[i]
+		if previous.MetricsSnapshot != nil {
+			return current, previous
+		}
+	}
+	return current, nil
+}
+
+func currentMemoryGrowthPct(app *model.Application, now timeseries.Time) float32 {
+	var maxPct float32
+	for _, instance := range app.Instances {
+		for _, container := range instance.Containers {
+			if pct := auditor.MemoryGrowthPct(container.MemoryRss, container.MemoryLimit.Reduce(timeseries.Max), now); pct > maxPct {
+				maxPct = pct
+			}
+		}
+	}
+	return maxPct
 }
 
 func (w *Deployments) sendNotifications(project *db.Project, world *model.World) {
@@ -261,7 +394,7 @@ func calcDeployments(app *model.Application) []*model.ApplicationDeployment {
 			}
 			if deployment == nil {
 				name := ""
-				for _, n := range rss.names { // get some new name
+				for _, n := range rss.names {
 					if n != prev {
 						name = n
 						break

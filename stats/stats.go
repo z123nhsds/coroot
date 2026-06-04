@@ -71,6 +71,7 @@ type Stats struct {
 		Instances           int                                 `json:"instances"`
 		Deployments         int                                 `json:"deployments"`
 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
+		Isolations          db.ServiceIsolationStats            `json:"isolations"`
 		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
 	} `json:"infra"`
 	UX struct {
@@ -524,6 +525,13 @@ func (c *Collector) collect() Stats {
 
 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
+
+	isolationStats, err := c.db.GetServiceIsolationStats()
+	if err != nil {
+		klog.Errorln(err)
+	} else {
+		stats.Infra.Isolations = isolationStats
+	}
 
 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
 

@@ -76,6 +76,7 @@ func (as ProjectActionSet) List() []Action {
 		as.Anomalies().View(),
 		as.Risks().View(),
 		as.Risks().Edit(),
+		as.Isolations().Edit(),
 		as.Application("*", "*", "*", "*").View(),
 		as.Node("*").View(),
 		as.Dashboards().Edit(),
@@ -137,6 +138,10 @@ func (as ProjectActionSet) Anomalies() ProjectViewAction {
 
 func (as ProjectActionSet) Risks() ProjectAction {
 	return ProjectAction{project: &as, scope: ScopeProjectRisks}
+}
+
+func (as ProjectActionSet) Isolations() ProjectEditAction {
+	return ProjectEditAction{project: &as, scope: ScopeProjectIsolations}
 }
 
 func (as ProjectActionSet) Application(category model.ApplicationCategory, namespace string, kind model.ApplicationKind, name string) ApplicationActionSet {

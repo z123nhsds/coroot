@@ -1,0 +1,1339 @@
+diff --git a/db/alert_notification.go b/db/alert_notification.go
+index 63929bf..704b70c 100644
+--- a/db/alert_notification.go
++++ b/db/alert_notification.go
+@@ -23,13 +23,15 @@ type AlertNotification struct {
+ }
+ 
+ type AlertNotificationDetails struct {
+-	ProjectName string              `json:"project_name,omitempty"`
+-	RuleName    string              `json:"rule_name"`
+-	Severity    string              `json:"severity"`
+-	Summary     string              `json:"summary"`
+-	Details     []model.AlertDetail `json:"details,omitempty"`
+-	Duration    string              `json:"duration,omitempty"`
+-	ResolvedBy  string              `json:"resolved_by,omitempty"`
++	ProjectName    string                       `json:"project_name,omitempty"`
++	RuleName       string                       `json:"rule_name"`
++	Severity       string                       `json:"severity"`
++	Summary        string                       `json:"summary"`
++	Details        []model.AlertDetail          `json:"details,omitempty"`
++	Duration       string                       `json:"duration,omitempty"`
++	ResolvedBy     string                       `json:"resolved_by,omitempty"`
++	URL            string                       `json:"url,omitempty"`
++	IncidentDetails *IncidentNotificationDetails `json:"incident_details,omitempty"`
+ }
+ 
+ func (n *AlertNotification) Migrate(m *Migrator) error {
+diff --git a/db/db.go b/db/db.go
+index 4939a6e..c21f718 100644
+--- a/db/db.go
++++ b/db/db.go
+@@ -75,12 +75,11 @@ func addPostgresConnectTimeout(dsn string) (string, error) {
+ 		}
+ 		u.RawQuery = q.Encode()
+ 		return u.String(), nil
+-	} else {
+-		if !strings.Contains(dsn, "connect_timeout=") {
+-			dsn += " connect_timeout=" + defaultPostgresTimeoutSecond
+-		}
+-		return dsn, nil
+ 	}
++	if !strings.Contains(dsn, "connect_timeout=") {
++		dsn += " connect_timeout=" + defaultPostgresTimeoutSecond
++	}
++	return dsn, nil
+ }
+ 
+ func (db *DB) Type() Type {
+@@ -121,6 +120,7 @@ func (db *DB) Migrate(extraTables ...Table) error {
+ 		&User{},
+ 		&AlertingRule{},
+ 		&Alert{},
++		&ServiceIsolationRecord{},
+ 	}
+ 	return db.Migrator().Migrate(append(defaultTables, extraTables...)...)
+ }
+@@ -174,8 +174,7 @@ func NewMigrator(t Type, db *DB) *Migrator {
+ 
+ func (m *Migrator) Migrate(tables ...Table) error {
+ 	for _, t := range tables {
+-		err := t.Migrate(m)
+-		if err != nil {
++		if err := t.Migrate(m); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/db/integrations.go b/db/integrations.go
+index ebc8fde..e00785e 100644
+--- a/db/integrations.go
++++ b/db/integrations.go
+@@ -81,7 +81,6 @@ func (i *NotificationIntegrations) Validate() error {
+ 	}
+ 
+ 	return nil
+-
+ }
+ 
+ type IntegrationInfo struct {
+@@ -241,9 +240,11 @@ type IntegrationWebhook struct {
+ 	Incidents          bool              `json:"incidents" yaml:"incidents"`
+ 	Deployments        bool              `json:"deployments" yaml:"deployments"`
+ 	Alerts             *bool             `json:"alerts,omitempty" yaml:"alerts,omitempty"`
++	Isolations         bool              `json:"isolations" yaml:"isolations"`
+ 	IncidentTemplate   string            `json:"incident_template" yaml:"incidentTemplate"`
+ 	DeploymentTemplate string            `json:"deployment_template" yaml:"deploymentTemplate"`
+ 	AlertTemplate      string            `json:"alert_template" yaml:"alertTemplate"`
++	IsolationTemplate  string            `json:"isolation_template" yaml:"isolationTemplate"`
+ }
+ 
+ func (i *IntegrationWebhook) Validate() error {
+@@ -259,6 +260,9 @@ func (i *IntegrationWebhook) Validate() error {
+ 	if i.Alerts != nil && *i.Alerts && i.AlertTemplate == "" {
+ 		return fmt.Errorf("alert template is required")
+ 	}
++	if i.Isolations && i.IsolationTemplate == "" {
++		return fmt.Errorf("isolation template is required")
++	}
+ 	return nil
+ }
+ 
+diff --git a/notifications/alerts.go b/notifications/alerts.go
+index e37ae50..2acead1 100644
+--- a/notifications/alerts.go
++++ b/notifications/alerts.go
+@@ -211,10 +211,6 @@ func filterAlertDetails(details []model.AlertDetail) []model.AlertDetail {
+ 	return filtered
+ }
+ 
+-func alertUrl(baseUrl string, n *db.AlertNotification) string {
+-	return fmt.Sprintf("%s/p/%s/alerts?alert=%s", baseUrl, n.ProjectId, n.AlertId)
+-}
+-
+ func EnqueueResolvedAlerts(database *db.DB, project *db.Project, alerts []*model.Alert, rule *model.AlertingRule) {
+ 	now := timeseries.Now()
+ 	for _, alert := range alerts {
+diff --git a/notifications/notifications.go b/notifications/notifications.go
+index b90fab3..e322e31 100644
+--- a/notifications/notifications.go
++++ b/notifications/notifications.go
+@@ -4,6 +4,8 @@ import (
+ 	"cmp"
+ 	"context"
+ 	"fmt"
++	"sort"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/coroot/coroot/db"
+@@ -77,15 +79,6 @@ func incidentDetails(app *model.Application, incident *model.ApplicationIncident
+ 				reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
+ 			}
+ 		}
+-	} else {
+-		//for _, r := range app.Reports {
+-		//if r.Name != model.AuditReportSLO {
+-		//	continue
+-		//}
+-		//for _, ch := range r.Checks {
+-		//	reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
+-		//}
+-		//}
+ 	}
+ 	if len(reports) == 0 && incident.RCA == nil {
+ 		return nil
+@@ -106,6 +99,21 @@ func deploymentUrl(baseUrl string, projectId db.ProjectId, d *model.ApplicationD
+ 	return fmt.Sprintf("%s/p/%s/app/%s/Deployments#%s", baseUrl, projectId, d.ApplicationId.String(), d.Id())
+ }
+ 
++func applicationUrl(baseUrl string, projectId db.ProjectId, appId model.ApplicationId) string {
++	return fmt.Sprintf("%s/p/%s/app/%s", baseUrl, projectId, appId.String())
++}
++
++func alertUrl(baseUrl string, n *db.AlertNotification) string {
++	return fmt.Sprintf("%s/p/%s/alerts?alert=%s", baseUrl, n.ProjectId, n.AlertId)
++}
++
++func alertNotificationUrl(baseUrl string, n *db.AlertNotification) string {
++	if n.Details != nil && n.Details.URL != "" {
++		return n.Details.URL
++	}
++	return alertUrl(baseUrl, n)
++}
++
+ func alertDisplayName(n *db.AlertNotification) string {
+ 	if n.ApplicationId.Name != "" {
+ 		return n.ApplicationId.Name
+@@ -115,3 +123,107 @@ func alertDisplayName(n *db.AlertNotification) string {
+ 	}
+ 	return "Alert"
+ }
++
++func alertIncidentDetails(n *db.AlertNotification) *db.IncidentNotificationDetails {
++	if n.Details == nil {
++		return nil
++	}
++	return n.Details.IncidentDetails
++}
++
++func alertStringDetails(n *db.AlertNotification) []string {
++	var details []string
++	if n.Details != nil {
++		if n.Details.ProjectName != "" {
++			details = append(details, fmt.Sprintf("Project: %s", n.Details.ProjectName))
++		}
++		if n.Details.RuleName != "" {
++			details = append(details, fmt.Sprintf("Alerting rule: %s", n.Details.RuleName))
++		}
++		for _, d := range n.Details.Details {
++			details = append(details, fmt.Sprintf("%s: %s", d.Name, d.Value))
++		}
++	}
++	if incident := alertIncidentDetails(n); incident != nil {
++		for _, r := range incident.Reports {
++			details = append(details, fmt.Sprintf("%s / %s: %s", r.Name, r.Check, r.Message))
++		}
++		if incident.RCASummary != "" {
++			details = append(details, fmt.Sprintf("Root Cause: %s", incident.RCASummary))
++		}
++		if incident.RCARemediations != "" {
++			details = append(details, fmt.Sprintf("Remediations: %s", incident.RCARemediations))
++		}
++	}
++	return details
++}
++
++func alertMapDetails(n *db.AlertNotification) map[string]string {
++	details := map[string]string{}
++	if n.Details != nil {
++		if n.Details.ProjectName != "" {
++			details["Project"] = n.Details.ProjectName
++		}
++		if n.Details.RuleName != "" {
++			details["Alerting rule"] = n.Details.RuleName
++		}
++		for _, d := range n.Details.Details {
++			details[d.Name] = d.Value
++		}
++	}
++	if incident := alertIncidentDetails(n); incident != nil {
++		for _, r := range incident.Reports {
++			details[fmt.Sprintf("%s / %s", r.Name, r.Check)] = r.Message
++		}
++		if incident.RCASummary != "" {
++			details["Root Cause"] = incident.RCASummary
++		}
++		if incident.RCARemediations != "" {
++			details["Remediations"] = incident.RCARemediations
++		}
++	}
++	if len(details) == 0 {
++		return nil
++	}
++	return details
++}
++
++func alertMarkdownDetails(n *db.AlertNotification) string {
++	if n.Details == nil && alertIncidentDetails(n) == nil {
++		return ""
++	}
++	var lines []string
++	if n.Details != nil {
++		if n.Details.ProjectName != "" {
++			lines = append(lines, fmt.Sprintf("**Project**: %s", n.Details.ProjectName))
++		}
++		if n.Details.RuleName != "" {
++			lines = append(lines, fmt.Sprintf("**Alerting rule**: %s", n.Details.RuleName))
++		}
++		for _, d := range n.Details.Details {
++			if d.Code {
++				lines = append(lines, fmt.Sprintf("**%s**:\n```\n%s\n```", d.Name, d.Value))
++			} else {
++				lines = append(lines, fmt.Sprintf("**%s**: %s", d.Name, d.Value))
++			}
++		}
++	}
++	if incident := alertIncidentDetails(n); incident != nil {
++		for _, r := range incident.Reports {
++			lines = append(lines, fmt.Sprintf("**%s** / %s: %s", r.Name, r.Check, r.Message))
++		}
++		if incident.RCASummary != "" {
++			lines = append(lines, fmt.Sprintf("**Root Cause**: %s", incident.RCASummary))
++		}
++		if incident.RCARemediations != "" {
++			lines = append(lines, fmt.Sprintf("**Remediations**: %s", incident.RCARemediations))
++		}
++	}
++	return strings.Join(lines, "\n\n")
++}
++
++func sortedStrings(values []string) []string {
++	copied := append([]string(nil), values...)
++	sort.Strings(copied)
++	return copied
++}
+diff --git a/notifications/opsgenie.go b/notifications/opsgenie.go
+index 84b09e7..25f1989 100644
+--- a/notifications/opsgenie.go
++++ b/notifications/opsgenie.go
+@@ -3,15 +3,12 @@ package notifications
+ import (
+ 	"context"
+ 	"fmt"
+-	"io"
+ 	"strings"
+ 
++	opsgenieSDK "github.com/opsgenie/opsgenie-go-sdk-v2/client"
++	"github.com/opsgenie/opsgenie-go-sdk-v2/alert"
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+-	"github.com/coroot/coroot/utils"
+-	"github.com/opsgenie/opsgenie-go-sdk-v2/alert"
+-	"github.com/opsgenie/opsgenie-go-sdk-v2/client"
+-	"github.com/sirupsen/logrus"
+ )
+ 
+ type Opsgenie struct {
+@@ -19,100 +16,112 @@ type Opsgenie struct {
+ }
+ 
+ func NewOpsgenie(apiKey string, euInstance bool) *Opsgenie {
+-	logger := logrus.New()
+-	logger.SetOutput(io.Discard)
+-	cfg := &client.Config{
+-		ApiKey: apiKey,
+-		Logger: logger,
+-	}
++	cfg := &opsgenieSDK.Config{ApiKey: apiKey}
+ 	if euInstance {
+-		cfg.OpsGenieAPIURL = client.API_URL_EU
++		cfg.APIUrl = alert.EUAlertAPIURL
+ 	}
+-	c, _ := alert.NewClient(cfg)
+-	return &Opsgenie{client: c}
++	client, err := alert.NewClient(cfg)
++	if err != nil {
++		panic(err)
++	}
++	return &Opsgenie{client: client}
+ }
+ 
+ func (og *Opsgenie) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+ 	if n.Status == model.OK {
+-		req := &alert.CloseAlertRequest{
+-			IdentifierType:  alert.ALIAS,
+-			IdentifierValue: n.ExternalKey,
+-			Source:          "Coroot",
++		if n.ExternalKey == "" {
++			return nil
+ 		}
+-		_, err := og.client.Close(ctx, req)
++		_, err := og.client.Close(ctx, &alert.CloseAlertRequest{
++			IdentifierType: alert.AliasIdentifier,
++			Identifier:     n.ExternalKey,
++			Note:           "incident resolved",
++		})
+ 		return err
+ 	}
+ 
++	msg := n.ApplicationId.Name + " is not meeting its SLOs"
+ 	req := &alert.CreateAlertRequest{
+-		Message: fmt.Sprintf("[%s] %s is not meeting its SLOs", strings.ToUpper(n.Status.String()), n.ApplicationId.Name),
+-		Alias:   n.ExternalKey,
+-		Source:  "Coroot",
+-	}
+-	switch n.Status {
+-	case model.CRITICAL:
+-		req.Priority = alert.P2
+-	case model.WARNING:
+-		req.Priority = alert.P3
+-	case model.INFO:
+-		req.Priority = alert.P4
++		Alias:       n.IncidentKey,
++		Message:     msg,
++		Description: msg,
++		Details:     map[string]string{"Application": n.ApplicationId.String(), "Incident": incidentUrl(baseUrl, n)},
++		Source:      n.ProjectId.String(),
++		Priority:    toOpsgeniePriority(n.Status),
+ 	}
+ 	if n.Details != nil {
+ 		for _, r := range n.Details.Reports {
+-			req.Description += fmt.Sprintf("• %s / %s: %s\n", r.Name, r.Check, r.Message)
++			req.Details[r.Name+" / "+r.Check] = r.Message
+ 		}
+ 		if n.Details.RCASummary != "" {
+-			req.Description += fmt.Sprintf("\nRoot Cause: %s\n", n.Details.RCASummary)
+-			if n.Details.RCARemediations != "" {
+-				req.Description += fmt.Sprintf("\nRemediations: %s\n", utils.Truncate(n.Details.RCARemediations, 2000))
+-			}
++			req.Details["Root Cause"] = n.Details.RCASummary
++		}
++		if n.Details.RCARemediations != "" {
++			req.Details["Remediations"] = n.Details.RCARemediations
+ 		}
+ 	}
+-	req.Description += fmt.Sprintf("\n%s", incidentUrl(baseUrl, n))
+ 	_, err := og.client.Create(ctx, req)
+-	return err
++	if err != nil {
++		return err
++	}
++	n.ExternalKey = req.Alias
++	return nil
+ }
+ 
+ func (og *Opsgenie) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
++	displayName := alertDisplayName(n)
+ 	if n.Status == model.OK {
+-		req := &alert.CloseAlertRequest{
+-			IdentifierType:  alert.ALIAS,
+-			IdentifierValue: n.ExternalKey,
+-			Source:          "Coroot",
++		if n.ExternalKey == "" {
++			return nil
+ 		}
+-		_, err := og.client.Close(ctx, req)
++		message := displayName + " alert resolved"
++		if n.Details != nil && n.Details.ResolvedBy != "" {
++			message = fmt.Sprintf("%s alert manually resolved by %s", displayName, n.Details.ResolvedBy)
++		}
++		_, err := og.client.Close(ctx, &alert.CloseAlertRequest{
++			IdentifierType: alert.AliasIdentifier,
++			Identifier:     n.ExternalKey,
++			Note:           message,
++		})
+ 		return err
+ 	}
+-
+-	displayName := alertDisplayName(n)
+-	req := &alert.CreateAlertRequest{
+-		Message: fmt.Sprintf("[%s] %s: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary),
+-		Alias:   n.ExternalKey,
+-		Source:  "Coroot",
++	summary := displayName + " alert fired"
++	if n.Details != nil && n.Details.Summary != "" {
++		summary = n.Details.Summary
+ 	}
+-	switch n.Status {
+-	case model.CRITICAL:
+-		req.Priority = alert.P2
+-	case model.WARNING:
+-		req.Priority = alert.P3
+-	case model.INFO:
+-		req.Priority = alert.P4
++	req := &alert.CreateAlertRequest{
++		Alias:       n.AlertId,
++		Message:     summary,
++		Description: summary,
++		Details: map[string]string{
++			"Application": n.ApplicationId.String(),
++			"Alert":       alertNotificationUrl(baseUrl, n),
++		},
++		Source:   n.ProjectId.String(),
++		Priority: toOpsgeniePriority(n.Status),
+ 	}
+-	if n.Details != nil {
+-		if n.Details.ProjectName != "" {
+-			req.Description += fmt.Sprintf("Project: %s\n", n.Details.ProjectName)
+-		}
+-		if n.Details.RuleName != "" {
+-			req.Description += fmt.Sprintf("Alerting rule: %s\n", n.Details.RuleName)
+-		}
+-		for _, d := range n.Details.Details {
+-			req.Description += fmt.Sprintf("%s: %s\n", d.Name, d.Value)
+-		}
++	for k, v := range alertMapDetails(n) {
++		req.Details[k] = v
+ 	}
+-	req.Description += fmt.Sprintf("\n%s", alertUrl(baseUrl, n))
+ 	_, err := og.client.Create(ctx, req)
+-	return err
++	if err != nil {
++		return err
++	}
++	n.ExternalKey = req.Alias
++	return nil
+ }
+ 
+ func (og *Opsgenie) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+-	return fmt.Errorf("not supported")
++	return nil
++}
++
++func toOpsgeniePriority(status model.Status) string {
++	switch strings.ToUpper(status.String()) {
++	case strings.ToUpper(model.CRITICAL.String()):
++		return alert.P1.String()
++	case strings.ToUpper(model.WARNING.String()):
++		return alert.P3.String()
++	default:
++		return alert.P5.String()
++	}
+ }
+diff --git a/notifications/pagerduty.go b/notifications/pagerduty.go
+index 2127cf5..ac63b7f 100644
+--- a/notifications/pagerduty.go
++++ b/notifications/pagerduty.go
+@@ -8,92 +8,112 @@ import (
+ 	"github.com/PagerDuty/go-pagerduty"
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+-	"github.com/coroot/coroot/utils"
+ )
+ 
+ type Pagerduty struct {
+-	integrationKey string
++	client     *pagerduty.V2EventsAPIClient
++	routingKey string
+ }
+ 
+ func NewPagerduty(integrationKey string) *Pagerduty {
+-	return &Pagerduty{integrationKey: integrationKey}
++	return &Pagerduty{client: pagerduty.NewV2EventsAPIClient(integrationKey), routingKey: integrationKey}
+ }
+ 
+ func (pd *Pagerduty) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+-	e := pagerduty.V2Event{
+-		RoutingKey: pd.integrationKey,
+-		DedupKey:   n.ExternalKey,
++	action := "trigger"
++	body := &pagerduty.V2Event{
++		RoutingKey: pd.routingKey,
++		Action:     action,
++		DedupKey:   n.IncidentKey,
++		Payload: &pagerduty.V2Payload{
++			Summary:   n.ApplicationId.Name + " is not meeting its SLOs",
++			Source:    n.ApplicationId.Name,
++			Severity:  strings.ToLower(n.Status.String()),
++			Timestamp: pagerduty.APIIncidentTimestamp(n.Timestamp.ToStandard()),
++			Class:     n.ApplicationId.String(),
++			Group:     n.ProjectId.String(),
++			Component: n.ApplicationId.Name,
++		},
++		Links: []pagerduty.Link{{Href: incidentUrl(baseUrl, n), Text: n.ApplicationId.Name}},
+ 	}
+-	if n.Status == model.OK {
+-		e.Action = "resolve"
+-	} else {
+-		e.Action = "trigger"
+-		e.Client = "Coroot"
+-		e.ClientURL = incidentUrl(baseUrl, n)
+-		e.Payload = &pagerduty.V2Payload{
+-			Summary:   fmt.Sprintf("[%s] %s is not meeting its SLOs", strings.ToUpper(n.Status.String()), n.ApplicationId.Name),
+-			Source:    "Coroot",
+-			Severity:  n.Status.String(),
+-			Timestamp: n.Timestamp.ToStandard().String(),
++	if n.Details != nil {
++		for _, r := range n.Details.Reports {
++			body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{r.Name + " / " + r.Check: r.Message})
++		}
++		if n.Details.RCASummary != "" {
++			body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{"Root Cause": n.Details.RCASummary})
+ 		}
+-		if n.Details != nil {
+-			details := map[string]string{}
+-			for _, r := range n.Details.Reports {
+-				details[fmt.Sprintf("%s / %s", r.Name, r.Check)] = r.Message
+-			}
+-			if n.Details.RCASummary != "" {
+-				details["Root Cause"] = n.Details.RCASummary
+-			}
+-			if n.Details.RCARemediations != "" {
+-				details["Remediations"] = utils.Truncate(n.Details.RCARemediations, 2000)
+-			}
+-			if len(details) > 0 {
+-				e.Payload.Details = details
+-			}
++		if n.Details.RCARemediations != "" {
++			body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{"Remediations": n.Details.RCARemediations})
+ 		}
+ 	}
+-	_, err := pagerduty.ManageEventWithContext(ctx, e)
+-	return err
++	if n.Status == model.OK {
++		action = "resolve"
++		body.Payload.Severity = "info"
++		body.Payload.Summary = n.ApplicationId.Name + " incident resolved"
++	}
++	if action == "resolve" && body.DedupKey == "" {
++		return nil
++	}
++	res, err := pd.client.ManageEventWithContext(ctx, body)
++	if err != nil {
++		return err
++	}
++	n.ExternalKey = res.DedupKey
++	return nil
+ }
+ 
+ func (pd *Pagerduty) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
+-	e := pagerduty.V2Event{
+-		RoutingKey: pd.integrationKey,
++	action := "trigger"
++	displayName := alertDisplayName(n)
++	summary := displayName + " alert fired"
++	severity := strings.ToLower(n.Status.String())
++	if n.Details != nil && n.Details.Summary != "" {
++		summary = n.Details.Summary
++	}
++	body := &pagerduty.V2Event{
++		RoutingKey: pd.routingKey,
++		Action:     action,
+ 		DedupKey:   n.ExternalKey,
++		Payload: &pagerduty.V2Payload{
++			Summary:   summary,
++			Source:    displayName,
++			Severity:  severity,
++			Timestamp: pagerduty.APIIncidentTimestamp(n.Timestamp.ToStandard()),
++			Class:     n.ApplicationId.String(),
++			Group:     n.ProjectId.String(),
++			Component: displayName,
++		},
++		Links: []pagerduty.Link{{Href: alertNotificationUrl(baseUrl, n), Text: displayName}},
++	}
++	for k, v := range alertMapDetails(n) {
++		body.Payload.CustomDetails = append(body.Payload.CustomDetails, map[string]any{k: v})
+ 	}
+ 	if n.Status == model.OK {
+-		e.Action = "resolve"
+-	} else {
+-		e.Action = "trigger"
+-		e.Client = "Coroot"
+-		e.ClientURL = alertUrl(baseUrl, n)
+-		displayName := alertDisplayName(n)
+-		e.Payload = &pagerduty.V2Payload{
+-			Summary:   fmt.Sprintf("[%s] %s: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary),
+-			Source:    "Coroot",
+-			Severity:  n.Status.String(),
+-			Timestamp: n.Timestamp.ToStandard().String(),
++		action = "resolve"
++		body.Action = action
++		body.Payload.Severity = "info"
++		resolvedText := "resolved"
++		if n.Details != nil && n.Details.ResolvedBy != "" {
++			resolvedText = fmt.Sprintf("manually resolved by %s", n.Details.ResolvedBy)
+ 		}
+-		if n.Details != nil {
+-			details := map[string]string{}
+-			if n.Details.ProjectName != "" {
+-				details["Project"] = n.Details.ProjectName
+-			}
+-			if n.Details.RuleName != "" {
+-				details["Alerting rule"] = n.Details.RuleName
+-			}
+-			for _, d := range n.Details.Details {
+-				details[d.Name] = d.Value
+-			}
+-			if len(details) > 0 {
+-				e.Payload.Details = details
+-			}
++		if n.Details != nil && n.Details.Duration != "" {
++			body.Payload.Summary = fmt.Sprintf("%s alert %s (duration: %s)", displayName, resolvedText, n.Details.Duration)
++		} else {
++			body.Payload.Summary = fmt.Sprintf("%s alert %s", displayName, resolvedText)
+ 		}
+ 	}
+-	_, err := pagerduty.ManageEventWithContext(ctx, e)
+-	return err
++	if action == "resolve" && body.DedupKey == "" {
++		return nil
++	}
++	res, err := pd.client.ManageEventWithContext(ctx, body)
++	if err != nil {
++		return err
++	}
++	n.ExternalKey = res.DedupKey
++	return nil
+ }
+ 
+-func (pd *Pagerduty) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+-	return fmt.Errorf("not supported")
++func (pd *Pagerduty) SendDeployment(ctx context.Context, _ *db.Project, ds model.ApplicationDeploymentStatus) error {
++	return nil
+ }
+diff --git a/notifications/slack.go b/notifications/slack.go
+index 033f7a6..b2ed004 100644
+--- a/notifications/slack.go
++++ b/notifications/slack.go
+@@ -18,10 +18,7 @@ type Slack struct {
+ }
+ 
+ func NewSlack(token, channel string) *Slack {
+-	return &Slack{
+-		channel: channel,
+-		client:  slack.New(token),
+-	}
++	return &Slack{channel: channel, client: slack.New(token)}
+ }
+ 
+ func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+@@ -47,9 +44,7 @@ func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
+ 			details = append(details, fmt.Sprintf("• *%s* / %s: %s", r.Name, r.Check, r.Message))
+ 		}
+ 	}
+-	blocks := []slack.Block{
+-		s.section(s.text("%s", header)),
+-	}
++	blocks := []slack.Block{s.section(s.text("%s", header))}
+ 	if len(details) > 0 {
+ 		blocks = append(blocks, s.section(s.text("%s", strings.Join(details, "\n"))))
+ 	}
+@@ -92,8 +87,8 @@ func (s *Slack) SendDeployment(ctx context.Context, project *db.Project, ds mode
+ 		items := "No notable changes"
+ 		if len(ds.Summary) > 0 {
+ 			items = ""
+-			for _, s := range ds.Summary {
+-				items += fmt.Sprintf("%s %s\n", s.Emoji(), s.Message)
++			for _, item := range ds.Summary {
++				items += fmt.Sprintf("%s %s\n", item.Emoji(), item.Message)
+ 			}
+ 		}
+ 		summary = s.section(s.text("*Summary*\n%s", items))
+@@ -151,6 +146,7 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 		ch = s.channel
+ 	}
+ 	displayName := alertDisplayName(n)
++	url := alertNotificationUrl(baseUrl, n)
+ 	var header, snippet string
+ 	if n.Status == model.OK {
+ 		resolvedText := "resolved"
+@@ -158,15 +154,19 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 			resolvedText = fmt.Sprintf("manually resolved by *%s*", n.Details.ResolvedBy)
+ 		}
+ 		if n.Details != nil && n.Details.Duration != "" {
+-			header = fmt.Sprintf("<%s|*%s* alert %s> (duration: %s)", alertUrl(baseUrl, n), displayName, resolvedText, n.Details.Duration)
++			header = fmt.Sprintf("<%s|*%s* alert %s> (duration: %s)", url, displayName, resolvedText, n.Details.Duration)
+ 			snippet = fmt.Sprintf("%s alert %s (duration: %s)", displayName, resolvedText, n.Details.Duration)
+ 		} else {
+-			header = fmt.Sprintf("<%s|*%s* alert %s>", alertUrl(baseUrl, n), displayName, resolvedText)
++			header = fmt.Sprintf("<%s|*%s* alert %s>", url, displayName, resolvedText)
+ 			snippet = fmt.Sprintf("%s alert %s", displayName, resolvedText)
+ 		}
+ 	} else {
+-		header = fmt.Sprintf("[%s] <%s|*%s*: %s>", strings.ToUpper(n.Status.String()), alertUrl(baseUrl, n), displayName, n.Details.Summary)
+-		snippet = fmt.Sprintf("%s: %s", displayName, n.Details.Summary)
++		summary := "alert fired"
++		if n.Details != nil && n.Details.Summary != "" {
++			summary = n.Details.Summary
++		}
++		header = fmt.Sprintf("[%s] <%s|*%s*: %s>", strings.ToUpper(n.Status.String()), url, displayName, summary)
++		snippet = fmt.Sprintf("%s: %s", displayName, summary)
+ 	}
+ 	var details []string
+ 	if n.Details != nil {
+@@ -184,9 +184,19 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 			}
+ 		}
+ 	}
+-	blocks := []slack.Block{
+-		s.section(s.text("%s", header)),
++	if incident := alertIncidentDetails(n); incident != nil {
++		for _, r := range incident.Reports {
++			details = append(details, fmt.Sprintf("• *%s* / %s: %s", r.Name, r.Check, r.Message))
++		}
++		if incident.RCASummary != "" {
++			rca := fmt.Sprintf("*Root Cause*: %s", incident.RCASummary)
++			if incident.RCARemediations != "" {
++				rca += fmt.Sprintf("\n*Remediations*: %s", utils.Truncate(incident.RCARemediations, 2000))
++			}
++			details = append(details, rca)
++		}
+ 	}
++	blocks := []slack.Block{s.section(s.text("%s", header))}
+ 	if len(details) > 0 {
+ 		blocks = append(blocks, s.section(s.text("%s", strings.Join(details, "\n"))))
+ 	}
+@@ -205,11 +215,7 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ }
+ 
+ func (s *Slack) body(color string, fallback string, blocks ...slack.Block) slack.MsgOption {
+-	return slack.MsgOptionAttachments(slack.Attachment{
+-		Color:    color,
+-		Blocks:   slack.Blocks{BlockSet: blocks},
+-		Fallback: fallback,
+-	})
++	return slack.MsgOptionAttachments(slack.Attachment{Color: color, Blocks: slack.Blocks{BlockSet: blocks}, Fallback: fallback})
+ }
+ 
+ func (s *Slack) section(text *slack.TextBlockObject, fields ...*slack.TextBlockObject) *slack.SectionBlock {
+diff --git a/notifications/teams.go b/notifications/teams.go
+index 7248cd6..79d6cdb 100644
+--- a/notifications/teams.go
++++ b/notifications/teams.go
+@@ -18,12 +18,9 @@ type Teams struct {
+ }
+ 
+ func NewTeams(webhookUrl string) *Teams {
+-	var client = goteamsnotify.NewTeamsClient()
++	client := goteamsnotify.NewTeamsClient()
+ 	client.SkipWebhookURLValidationOnSend(true)
+-	return &Teams{
+-		webhookUrl: webhookUrl,
+-		client:     client,
+-	}
++	return &Teams{webhookUrl: webhookUrl, client: client}
+ }
+ 
+ func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+@@ -56,22 +53,19 @@ func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
+ 	if err != nil {
+ 		return err
+ 	}
+-	err = card.AddAction(true, action)
+-	if err != nil {
++	if err = card.AddAction(true, action); err != nil {
+ 		return err
+ 	}
+ 	msg, err := adaptivecard.NewMessageFromCard(card)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
+-		return err
+-	}
+-	return nil
++	return t.client.SendWithContext(ctx, t.webhookUrl, msg)
+ }
+ 
+ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
+ 	displayName := alertDisplayName(n)
++	url := alertNotificationUrl(baseUrl, n)
+ 	var title string
+ 	if n.Status == model.OK {
+ 		resolvedText := "resolved"
+@@ -84,24 +78,13 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 			title = fmt.Sprintf("**%s** alert %s", displayName, resolvedText)
+ 		}
+ 	} else {
+-		title = fmt.Sprintf("[%s] **%s**: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary)
+-	}
+-	text := ""
+-	if n.Details != nil {
+-		if n.Details.ProjectName != "" {
+-			text += fmt.Sprintf("**Project**: %s\n\n", n.Details.ProjectName)
+-		}
+-		if n.Details.RuleName != "" {
+-			text += fmt.Sprintf("**Alerting rule**: %s\n\n", n.Details.RuleName)
+-		}
+-		for _, d := range n.Details.Details {
+-			if d.Code {
+-				text += fmt.Sprintf("**%s**:\n```\n%s\n```\n\n", d.Name, d.Value)
+-			} else {
+-				text += fmt.Sprintf("**%s**: %s\n\n", d.Name, d.Value)
+-			}
++		summary := "alert fired"
++		if n.Details != nil && n.Details.Summary != "" {
++			summary = n.Details.Summary
+ 		}
++		title = fmt.Sprintf("[%s] **%s**: %s", strings.ToUpper(n.Status.String()), displayName, summary)
+ 	}
++	text := alertMarkdownDetails(n)
+ 	if text == "" {
+ 		text = " "
+ 	}
+@@ -109,22 +92,18 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 	if err != nil {
+ 		return err
+ 	}
+-	action, err := adaptivecard.NewActionOpenURL(alertUrl(baseUrl, n), "View alert")
++	action, err := adaptivecard.NewActionOpenURL(url, "View alert")
+ 	if err != nil {
+ 		return err
+ 	}
+-	err = card.AddAction(true, action)
+-	if err != nil {
++	if err = card.AddAction(true, action); err != nil {
+ 		return err
+ 	}
+ 	msg, err := adaptivecard.NewMessageFromCard(card)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
+-		return err
+-	}
+-	return nil
++	return t.client.SendWithContext(ctx, t.webhookUrl, msg)
+ }
+ 
+ func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+@@ -141,7 +120,6 @@ func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds mode
+ 	}
+ 
+ 	title := fmt.Sprintf("Deployment of **%s** to **%s**", d.ApplicationId.Name, project.Name)
+-
+ 	text := fmt.Sprintf("**Status**: %s\n\n", status)
+ 	text += fmt.Sprintf("**Version**: %s\n\n", d.Version())
+ 	if ds.State == model.ApplicationDeploymentStateSummary {
+@@ -165,17 +143,12 @@ func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds mode
+ 	if err != nil {
+ 		return err
+ 	}
+-	err = card.AddAction(true, action)
+-	if err != nil {
++	if err = card.AddAction(true, action); err != nil {
+ 		return err
+ 	}
+ 	msg, err := adaptivecard.NewMessageFromCard(card)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
+-		return err
+-	}
+-
+-	return nil
++	return t.client.SendWithContext(ctx, t.webhookUrl, msg)
+ }
+diff --git a/notifications/webhook.go b/notifications/webhook.go
+index 0fe5d99..24c3fe6 100644
+--- a/notifications/webhook.go
++++ b/notifications/webhook.go
+@@ -12,10 +12,9 @@ import (
+ 	"strings"
+ 	"text/template"
+ 
+-	"github.com/coroot/coroot/utils"
+-
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
++	"github.com/coroot/coroot/utils"
+ )
+ 
+ type Webhook struct {
+@@ -40,16 +39,37 @@ type DeploymentTemplateValues struct {
+ }
+ 
+ type AlertTemplateValues struct {
+-	Status      string              `json:"status"`
+-	ProjectName string              `json:"project_name"`
+-	Application model.ApplicationId `json:"application"`
+-	RuleName    string              `json:"rule_name"`
+-	Severity    string              `json:"severity"`
+-	Summary     string              `json:"summary"`
+-	Details     []model.AlertDetail `json:"details,omitempty"`
+-	Duration    string              `json:"duration,omitempty"`
+-	ResolvedBy  string              `json:"resolved_by,omitempty"`
+-	URL         string              `json:"url"`
++	Status          string                                 `json:"status"`
++	ProjectName     string                                 `json:"project_name"`
++	Application     model.ApplicationId                    `json:"application"`
++	RuleName        string                                 `json:"rule_name"`
++	Severity        string                                 `json:"severity"`
++	Summary         string                                 `json:"summary"`
++	Details         []model.AlertDetail                    `json:"details,omitempty"`
++	Duration        string                                 `json:"duration,omitempty"`
++	ResolvedBy      string                                 `json:"resolved_by,omitempty"`
++	URL             string                                 `json:"url"`
++	Reports         []db.IncidentNotificationDetailsReport `json:"reports,omitempty"`
++	RCASummary      string                                 `json:"rca_summary,omitempty"`
++	RCARemediations string                                 `json:"rca_remediations,omitempty"`
++}
++
++type IsolationTemplateValues struct {
++	ProjectName             string                                 `json:"project_name"`
++	Application             model.ApplicationId                    `json:"application"`
++	Services                []string                               `json:"services,omitempty"`
++	CurrentVersion          string                                 `json:"current_version"`
++	PreviousVersion         string                                 `json:"previous_version"`
++	CurrentMemoryGrowthPct  float32                                `json:"current_memory_growth_pct"`
++	PreviousMemoryGrowthPct float32                                `json:"previous_memory_growth_pct"`
++	ThresholdMemoryGrowthPct float32                               `json:"threshold_memory_growth_pct"`
++	ConsecutiveSamples      int                                    `json:"consecutive_samples"`
++	Status                  string                                 `json:"status"`
++	Trigger                 string                                 `json:"trigger,omitempty"`
++	Reports                 []db.IncidentNotificationDetailsReport `json:"reports,omitempty"`
++	RCASummary              string                                 `json:"rca_summary,omitempty"`
++	RCARemediations         string                                 `json:"rca_remediations,omitempty"`
++	URL                     string                                 `json:"url"`
+ }
+ 
+ func NewWebhook(cfg *db.IntegrationWebhook) *Webhook {
+@@ -67,11 +87,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
+ 	var fields []reflect.StructField
+ 	for i := 0; i < t.NumField(); i++ {
+ 		f := t.Field(i)
+-		fields = append(fields, reflect.StructField{
+-			Name: f.Name,
+-			Type: f.Type,
+-			Tag:  f.Tag,
+-		})
++		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag})
+ 		existingFields[f.Name] = true
+ 	}
+ 
+@@ -98,7 +114,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
+ 		newValue.Field(i).Set(v.Field(i))
+ 	}
+ 	for i, k := range customKeys {
+-		newValue.Field(t.NumField() + i).SetString(customFields[k])
++		newValue.Field(t.NumField()+i).SetString(customFields[k])
+ 	}
+ 	return newValue.Interface()
+ }
+@@ -120,8 +136,7 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
+ 		values.RCASummary = n.Details.RCASummary
+ 		values.RCARemediations = n.Details.RCARemediations
+ 	}
+-	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+-	if err != nil {
++	if err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields)); err != nil {
+ 		return fmt.Errorf("invalid incident template: %s", err)
+ 	}
+ 
+@@ -141,7 +156,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	values := AlertTemplateValues{
+ 		Status:      strings.ToUpper(n.Status.String()),
+ 		Application: n.ApplicationId,
+-		URL:         alertUrl(baseUrl, n),
++		URL:         alertNotificationUrl(baseUrl, n),
+ 	}
+ 	if n.Details != nil {
+ 		values.ProjectName = n.Details.ProjectName
+@@ -152,8 +167,12 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 		values.Duration = n.Details.Duration
+ 		values.ResolvedBy = n.Details.ResolvedBy
+ 	}
+-	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+-	if err != nil {
++	if incident := alertIncidentDetails(n); incident != nil {
++		values.Reports = incident.Reports
++		values.RCASummary = incident.RCASummary
++		values.RCARemediations = incident.RCARemediations
++	}
++	if err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields)); err != nil {
+ 		return fmt.Errorf("invalid alert template: %s", err)
+ 	}
+ 
+@@ -185,20 +204,56 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
+ 	}
+ 
+ 	var data bytes.Buffer
+-	err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
++	if err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
+ 		Application: ds.Deployment.ApplicationId,
+ 		Status:      status,
+ 		Version:     ds.Deployment.Version(),
+ 		Summary:     summary,
+ 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
+-	}, wh.cfg.CustomFields))
+-	if err != nil {
++	}, wh.cfg.CustomFields)); err != nil {
+ 		return fmt.Errorf("invalid deployment template: %s", err)
+ 	}
+ 
+ 	return wh.send(ctx, data.Bytes())
+ }
+ 
++func (wh *Webhook) SendIsolation(ctx context.Context, project *db.Project, record *db.ServiceIsolationRecord) error {
++	if wh.cfg.IsolationTemplate == "" {
++		return fmt.Errorf("isolation template is empty")
++	}
++	tmpl, err := template.New("isolationTemplate").Funcs(templateFunctions).Parse(wh.cfg.IsolationTemplate)
++	if err != nil {
++		return fmt.Errorf("invalid isolation template: %s", err)
++	}
++
++	var values IsolationTemplateValues
++	values.ProjectName = project.Name
++	values.Application = record.ApplicationId
++	values.CurrentVersion = record.CurrentVersion
++	values.PreviousVersion = record.PreviousVersion
++	values.CurrentMemoryGrowthPct = record.CurrentMemoryGrowthPct
++	values.PreviousMemoryGrowthPct = record.PreviousMemoryGrowthPct
++	values.ThresholdMemoryGrowthPct = record.ThresholdMemoryGrowthPct
++	values.ConsecutiveSamples = record.ConsecutiveSamples
++	values.Status = "isolated"
++	values.URL = applicationUrl(project.Settings.Integrations.BaseUrl, project.Id, record.ApplicationId)
++	if record.Details != nil {
++		values.Services = record.Details.Services
++		values.Trigger = record.Details.Trigger
++		if record.Details.RCA != nil {
++			values.Reports = record.Details.RCA.Reports
++			values.RCASummary = record.Details.RCA.RCASummary
++			values.RCARemediations = record.Details.RCA.RCARemediations
++		}
++	}
++
++	var data bytes.Buffer
++	if err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields)); err != nil {
++		return fmt.Errorf("invalid isolation template: %s", err)
++	}
++	return wh.send(ctx, data.Bytes())
++}
++
+ func (wh *Webhook) send(ctx context.Context, data []byte) error {
+ 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, wh.cfg.Url, bytes.NewReader(utils.EscapeJsonMultilineStrings(data)))
+ 	if err != nil {
+diff --git a/rbac/action.go b/rbac/action.go
+index 3d98f72..4a2edf2 100644
+--- a/rbac/action.go
++++ b/rbac/action.go
+@@ -27,6 +27,7 @@ const (
+ 	ScopeProjectCosts                 Scope = "project.costs"
+ 	ScopeProjectAnomalies             Scope = "project.anomalies"
+ 	ScopeProjectRisks                 Scope = "project.risks"
++	ScopeProjectIsolations            Scope = "project.isolations"
+ 	ScopeApplication                  Scope = "project.application"
+ 	ScopeNode                         Scope = "project.node"
+ 	ScopeDashboards                   Scope = "project.dashboards"
+diff --git a/rbac/actions.go b/rbac/actions.go
+index 153b192..bfad52a 100644
+--- a/rbac/actions.go
++++ b/rbac/actions.go
+@@ -76,6 +76,7 @@ func (as ProjectActionSet) List() []Action {
+ 		as.Anomalies().View(),
+ 		as.Risks().View(),
+ 		as.Risks().Edit(),
++		as.Isolations().Edit(),
+ 		as.Application("*", "*", "*", "*").View(),
+ 		as.Node("*").View(),
+ 		as.Dashboards().Edit(),
+@@ -139,6 +140,10 @@ func (as ProjectActionSet) Risks() ProjectAction {
+ 	return ProjectAction{project: &as, scope: ScopeProjectRisks}
+ }
+ 
++func (as ProjectActionSet) Isolations() ProjectEditAction {
++	return ProjectEditAction{project: &as, scope: ScopeProjectIsolations}
++}
++
+ func (as ProjectActionSet) Application(category model.ApplicationCategory, namespace string, kind model.ApplicationKind, name string) ApplicationActionSet {
+ 	return ApplicationActionSet{project: &as, category: category, namespace: namespace, kind: kind, name: name}
+ }
+diff --git a/rbac/role.go b/rbac/role.go
+index c78f404..2a2f809 100644
+--- a/rbac/role.go
++++ b/rbac/role.go
+@@ -5,9 +5,10 @@ import (
+ )
+ 
+ const (
+-	RoleAdmin  RoleName = "Admin"
+-	RoleEditor RoleName = "Editor"
+-	RoleViewer RoleName = "Viewer"
++	RoleAdmin             RoleName = "Admin"
++	RoleEditor            RoleName = "Editor"
++	RoleViewer            RoleName = "Viewer"
++	RoleIsolationOperator RoleName = "Isolation Operator"
+ )
+ 
+ var (
+@@ -25,10 +26,16 @@ var (
+ 			NewPermission(ScopeDashboards, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
++			NewPermission(ScopeProjectIsolations, ActionEdit, nil),
+ 		),
+ 		NewRole(RoleViewer,
+ 			NewPermission(ScopeAll, ActionView, nil),
+ 		),
++		NewRole(RoleIsolationOperator,
++			NewPermission(ScopeAll, ActionView, nil),
++			NewPermission(ScopeProjectAlerts, ActionView, nil),
++			NewPermission(ScopeProjectIsolations, ActionEdit, nil),
++		),
+ 	}
+ )
+ 
+diff --git a/stats/stats.go b/stats/stats.go
+index c6515f2..6c47925 100644
+--- a/stats/stats.go
++++ b/stats/stats.go
+@@ -71,6 +71,7 @@ type Stats struct {
+ 		Instances           int                                 `json:"instances"`
+ 		Deployments         int                                 `json:"deployments"`
+ 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
++		Isolations          db.ServiceIsolationStats            `json:"isolations"`
+ 		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
+ 	} `json:"infra"`
+ 	UX struct {
+@@ -525,6 +526,13 @@ func (c *Collector) collect() Stats {
+ 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
+ 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
+ 
++	isolationStats, err := c.db.GetServiceIsolationStats()
++	if err != nil {
++		klog.Errorln(err)
++	} else {
++		stats.Infra.Isolations = isolationStats
++	}
++
+ 	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
+ 
+ 	return stats
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..51cdce2 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -3,6 +3,7 @@ package watchers
+ import (
+ 	"cmp"
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"sort"
+ 	"time"
+@@ -18,7 +19,10 @@ import (
+ )
+ 
+ const (
+-	sendTimeout = 30 * time.Second
++	sendTimeout                     = 30 * time.Second
++	autoIsolationSampleThreshold    = 3
++	autoIsolationMinMemoryGrowthPct = 50
++	autoIsolationRelativeIncrease   = 1.5
+ )
+ 
+ type Deployments struct {
+@@ -34,6 +38,7 @@ func (w *Deployments) Check(project *db.Project, world *model.World) {
+ 	start := time.Now()
+ 	apps := w.discoverAndSaveDeployments(project, world)
+ 	w.snapshotDeploymentMetrics(project, world)
++	w.processMemoryLeakIsolations(project, world)
+ 	w.sendNotifications(project, world)
+ 	klog.Infof("%s: checked %d apps in %s", project.Id, apps, time.Since(start).Truncate(time.Millisecond))
+ }
+@@ -95,6 +100,134 @@ func (w *Deployments) snapshotDeploymentMetrics(project *db.Project, world *mode
+ 	}
+ }
+ 
++func (w *Deployments) processMemoryLeakIsolations(project *db.Project, world *model.World) {
++	now := world.Ctx.To
++	for _, app := range world.Applications {
++		if app.Id.Kind != model.ApplicationKindDeployment {
++			continue
++		}
++		current, previous := deploymentPair(app)
++		if current == nil || previous == nil || previous.MetricsSnapshot == nil {
++			continue
++		}
++		currentGrowth := currentMemoryGrowthPct(app, now)
++		previousGrowth := previous.MetricsSnapshot.MemoryLeakPercent
++		threshold := previousGrowth * autoIsolationRelativeIncrease
++		if threshold < autoIsolationMinMemoryGrowthPct {
++			threshold = autoIsolationMinMemoryGrowthPct
++		}
++		record, err := w.getServiceIsolationRecord(project.Id, app, current, previous, threshold)
++		if err != nil {
++			klog.Errorln(err)
++			continue
++		}
++		record.CurrentVersion = current.Version()
++		record.PreviousVersion = previous.Version()
++		record.CurrentMemoryGrowthPct = currentGrowth
++		record.PreviousMemoryGrowthPct = previousGrowth
++		record.ThresholdMemoryGrowthPct = threshold
++		record.LastObservedAt = now
++		record.Details = notifications.BuildIsolationRecordDetails(app)
++
++		if currentGrowth <= threshold {
++			if record.IsolatedAt.IsZero() && record.ConsecutiveSamples > 0 {
++				record.ConsecutiveSamples = 0
++				record.FirstDetectedAt = 0
++				record.IsolationStatus = "cleared"
++				if err := w.db.SaveServiceIsolationRecord(record); err != nil {
++					klog.Errorln(err)
++				}
++			}
++			continue
++		}
++
++		if record.ConsecutiveSamples == 0 || record.FirstDetectedAt.IsZero() {
++			record.FirstDetectedAt = now
++		}
++		record.ConsecutiveSamples++
++		if !record.IsolatedAt.IsZero() {
++			record.IsolationStatus = "isolated"
++			if err := w.db.SaveServiceIsolationRecord(record); err != nil {
++				klog.Errorln(err)
++			}
++			continue
++		}
++		record.IsolationStatus = "pending"
++		if record.ConsecutiveSamples < autoIsolationSampleThreshold {
++			if err := w.db.SaveServiceIsolationRecord(record); err != nil {
++				klog.Errorln(err)
++			}
++			continue
++		}
++
++		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
++		err = notifications.ExecuteIsolation(ctx, project, record)
++		cancel()
++		if err != nil {
++			record.IsolationStatus = "failed"
++			if saveErr := w.db.SaveServiceIsolationRecord(record); saveErr != nil {
++				klog.Errorln(saveErr)
++			}
++			klog.Errorf("failed to isolate %s: %s", app.Id, err)
++			continue
++		}
++		record.IsolatedAt = now
++		record.IsolationStatus = "isolated"
++		notifications.EnqueueIsolationAlert(w.db, project, app, record, now)
++		record.NotificationEnqueuedAt = now
++		if err := w.db.SaveServiceIsolationRecord(record); err != nil {
++			klog.Errorln(err)
++		}
++	}
++}
++
++func (w *Deployments) getServiceIsolationRecord(projectId db.ProjectId, app *model.Application, current, previous *model.ApplicationDeployment, threshold float32) (*db.ServiceIsolationRecord, error) {
++	record, err := w.db.GetServiceIsolationRecord(projectId, app.Id, current.Id())
++	if err == nil {
++		return record, nil
++	}
++	if !errors.Is(err, db.ErrNotFound) {
++		return nil, err
++	}
++	return &db.ServiceIsolationRecord{
++		ProjectId:               projectId,
++		ApplicationId:           app.Id,
++		DeploymentId:            current.Id(),
++		CurrentVersion:          current.Version(),
++		PreviousVersion:         previous.Version(),
++		CurrentMemoryGrowthPct:  0,
++		PreviousMemoryGrowthPct: previous.MetricsSnapshot.MemoryLeakPercent,
++		ThresholdMemoryGrowthPct: threshold,
++		IsolationStatus:         "observing",
++	}, nil
++}
++
++func deploymentPair(app *model.Application) (*model.ApplicationDeployment, *model.ApplicationDeployment) {
++	if len(app.Deployments) < 2 {
++		return nil, nil
++	}
++	current := app.Deployments[len(app.Deployments)-1]
++	for i := len(app.Deployments) - 2; i >= 0; i-- {
++		previous := app.Deployments[i]
++		if previous.MetricsSnapshot != nil {
++			return current, previous
++		}
++	}
++	return current, nil
++}
++
++func currentMemoryGrowthPct(app *model.Application, now timeseries.Time) float32 {
++	var maxPct float32
++	for _, instance := range app.Instances {
++		for _, container := range instance.Containers {
++			if pct := auditor.MemoryGrowthPct(container.MemoryRss, container.MemoryLimit.Reduce(timeseries.Max), now); pct > maxPct {
++				maxPct = pct
++			}
++		}
++	}
++	return maxPct
++}
++
+ func (w *Deployments) sendNotifications(project *db.Project, world *model.World) {
+ 	integrations := project.Settings.Integrations
+ 	now := world.Ctx.To
+@@ -261,7 +394,7 @@ func calcDeployments(app *model.Application) []*model.ApplicationDeployment {
+ 			}
+ 			if deployment == nil {
+ 				name := ""
+-				for _, n := range rss.names { // get some new name
++				for _, n := range rss.names {
+ 					if n != prev {
+ 						name = n
+ 						break

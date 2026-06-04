@@ -211,10 +211,6 @@ func filterAlertDetails(details []model.AlertDetail) []model.AlertDetail {
 	return filtered
 }
 
-func alertUrl(baseUrl string, n *db.AlertNotification) string {
-	return fmt.Sprintf("%s/p/%s/alerts?alert=%s", baseUrl, n.ProjectId, n.AlertId)
-}
-
 func EnqueueResolvedAlerts(database *db.DB, project *db.Project, alerts []*model.Alert, rule *model.AlertingRule) {
 	now := timeseries.Now()
 	for _, alert := range alerts {

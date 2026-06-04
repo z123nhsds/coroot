@@ -12,10 +12,9 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/coroot/coroot/utils"
-
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
+	"github.com/coroot/coroot/utils"
 )
 
 type Webhook struct {
@@ -40,16 +39,37 @@ type DeploymentTemplateValues struct {
 }
 
 type AlertTemplateValues struct {
-	Status      string              `json:"status"`
-	ProjectName string              `json:"project_name"`
-	Application model.ApplicationId `json:"application"`
-	RuleName    string              `json:"rule_name"`
-	Severity    string              `json:"severity"`
-	Summary     string              `json:"summary"`
-	Details     []model.AlertDetail `json:"details,omitempty"`
-	Duration    string              `json:"duration,omitempty"`
-	ResolvedBy  string              `json:"resolved_by,omitempty"`
-	URL         string              `json:"url"`
+	Status          string                                 `json:"status"`
+	ProjectName     string                                 `json:"project_name"`
+	Application     model.ApplicationId                    `json:"application"`
+	RuleName        string                                 `json:"rule_name"`
+	Severity        string                                 `json:"severity"`
+	Summary         string                                 `json:"summary"`
+	Details         []model.AlertDetail                    `json:"details,omitempty"`
+	Duration        string                                 `json:"duration,omitempty"`
+	ResolvedBy      string                                 `json:"resolved_by,omitempty"`
+	URL             string                                 `json:"url"`
+	Reports         []db.IncidentNotificationDetailsReport `json:"reports,omitempty"`
+	RCASummary      string                                 `json:"rca_summary,omitempty"`
+	RCARemediations string                                 `json:"rca_remediations,omitempty"`
+}
+
+type IsolationTemplateValues struct {
+	ProjectName             string                                 `json:"project_name"`
+	Application             model.ApplicationId                    `json:"application"`
+	Services                []string                               `json:"services,omitempty"`
+	CurrentVersion          string                                 `json:"current_version"`
+	PreviousVersion         string                                 `json:"previous_version"`
+	CurrentMemoryGrowthPct  float32                                `json:"current_memory_growth_pct"`
+	PreviousMemoryGrowthPct float32                                `json:"previous_memory_growth_pct"`
+	ThresholdMemoryGrowthPct float32                               `json:"threshold_memory_growth_pct"`
+	ConsecutiveSamples      int                                    `json:"consecutive_samples"`
+	Status                  string                                 `json:"status"`
+	Trigger                 string                                 `json:"trigger,omitempty"`
+	Reports                 []db.IncidentNotificationDetailsReport `json:"reports,omitempty"`
+	RCASummary              string                                 `json:"rca_summary,omitempty"`
+	RCARemediations         string                                 `json:"rca_remediations,omitempty"`
+	URL                     string                                 `json:"url"`
 }
 
 func NewWebhook(cfg *db.IntegrationWebhook) *Webhook {
@@ -67,11 +87,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
 	var fields []reflect.StructField
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		fields = append(fields, reflect.StructField{
-			Name: f.Name,
-			Type: f.Type,
-			Tag:  f.Tag,
-		})
+		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag})
 		existingFields[f.Name] = true
 	}
 
@@ -98,7 +114,7 @@ func mergeCustomFields(values any, customFields map[string]string) any {
 		newValue.Field(i).Set(v.Field(i))
 	}
 	for i, k := range customKeys {
-		newValue.Field(t.NumField() + i).SetString(customFields[k])
+		newValue.Field(t.NumField()+i).SetString(customFields[k])
 	}
 	return newValue.Interface()
 }
@@ -120,8 +136,7 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
 		values.RCASummary = n.Details.RCASummary
 		values.RCARemediations = n.Details.RCARemediations
 	}
-	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
-	if err != nil {
+	if err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields)); err != nil {
 		return fmt.Errorf("invalid incident template: %s", err)
 	}
 
@@ -141,7 +156,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 	values := AlertTemplateValues{
 		Status:      strings.ToUpper(n.Status.String()),
 		Application: n.ApplicationId,
-		URL:         alertUrl(baseUrl, n),
+		URL:         alertNotificationUrl(baseUrl, n),
 	}
 	if n.Details != nil {
 		values.ProjectName = n.Details.ProjectName
@@ -152,8 +167,12 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 		values.Duration = n.Details.Duration
 		values.ResolvedBy = n.Details.ResolvedBy
 	}
-	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
-	if err != nil {
+	if incident := alertIncidentDetails(n); incident != nil {
+		values.Reports = incident.Reports
+		values.RCASummary = incident.RCASummary
+		values.RCARemediations = incident.RCARemediations
+	}
+	if err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields)); err != nil {
 		return fmt.Errorf("invalid alert template: %s", err)
 	}
 
@@ -185,17 +204,53 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
 	}
 
 	var data bytes.Buffer
-	err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
+	if err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
 		Application: ds.Deployment.ApplicationId,
 		Status:      status,
 		Version:     ds.Deployment.Version(),
 		Summary:     summary,
 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
-	}, wh.cfg.CustomFields))
-	if err != nil {
+	}, wh.cfg.CustomFields)); err != nil {
 		return fmt.Errorf("invalid deployment template: %s", err)
 	}
 
+	return wh.send(ctx, data.Bytes())
+}
+
+func (wh *Webhook) SendIsolation(ctx context.Context, project *db.Project, record *db.ServiceIsolationRecord) error {
+	if wh.cfg.IsolationTemplate == "" {
+		return fmt.Errorf("isolation template is empty")
+	}
+	tmpl, err := template.New("isolationTemplate").Funcs(templateFunctions).Parse(wh.cfg.IsolationTemplate)
+	if err != nil {
+		return fmt.Errorf("invalid isolation template: %s", err)
+	}
+
+	var values IsolationTemplateValues
+	values.ProjectName = project.Name
+	values.Application = record.ApplicationId
+	values.CurrentVersion = record.CurrentVersion
+	values.PreviousVersion = record.PreviousVersion
+	values.CurrentMemoryGrowthPct = record.CurrentMemoryGrowthPct
+	values.PreviousMemoryGrowthPct = record.PreviousMemoryGrowthPct
+	values.ThresholdMemoryGrowthPct = record.ThresholdMemoryGrowthPct
+	values.ConsecutiveSamples = record.ConsecutiveSamples
+	values.Status = "isolated"
+	values.URL = applicationUrl(project.Settings.Integrations.BaseUrl, project.Id, record.ApplicationId)
+	if record.Details != nil {
+		values.Services = record.Details.Services
+		values.Trigger = record.Details.Trigger
+		if record.Details.RCA != nil {
+			values.Reports = record.Details.RCA.Reports
+			values.RCASummary = record.Details.RCA.RCASummary
+			values.RCARemediations = record.Details.RCA.RCARemediations
+		}
+	}
+
+	var data bytes.Buffer
+	if err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields)); err != nil {
+		return fmt.Errorf("invalid isolation template: %s", err)
+	}
 	return wh.send(ctx, data.Bytes())
 }
 

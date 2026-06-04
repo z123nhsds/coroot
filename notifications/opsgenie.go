@@ -3,15 +3,12 @@ package notifications
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 
+	opsgenieSDK "github.com/opsgenie/opsgenie-go-sdk-v2/client"
+	"github.com/opsgenie/opsgenie-go-sdk-v2/alert"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
-	"github.com/coroot/coroot/utils"
-	"github.com/opsgenie/opsgenie-go-sdk-v2/alert"
-	"github.com/opsgenie/opsgenie-go-sdk-v2/client"
-	"github.com/sirupsen/logrus"
 )
 
 type Opsgenie struct {
@@ -19,100 +16,112 @@ type Opsgenie struct {
 }
 
 func NewOpsgenie(apiKey string, euInstance bool) *Opsgenie {
-	logger := logrus.New()
-	logger.SetOutput(io.Discard)
-	cfg := &client.Config{
-		ApiKey: apiKey,
-		Logger: logger,
-	}
+	cfg := &opsgenieSDK.Config{ApiKey: apiKey}
 	if euInstance {
-		cfg.OpsGenieAPIURL = client.API_URL_EU
+		cfg.APIUrl = alert.EUAlertAPIURL
 	}
-	c, _ := alert.NewClient(cfg)
-	return &Opsgenie{client: c}
+	client, err := alert.NewClient(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return &Opsgenie{client: client}
 }
 
 func (og *Opsgenie) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
 	if n.Status == model.OK {
-		req := &alert.CloseAlertRequest{
-			IdentifierType:  alert.ALIAS,
-			IdentifierValue: n.ExternalKey,
-			Source:          "Coroot",
+		if n.ExternalKey == "" {
+			return nil
 		}
-		_, err := og.client.Close(ctx, req)
+		_, err := og.client.Close(ctx, &alert.CloseAlertRequest{
+			IdentifierType: alert.AliasIdentifier,
+			Identifier:     n.ExternalKey,
+			Note:           "incident resolved",
+		})
 		return err
 	}
 
+	msg := n.ApplicationId.Name + " is not meeting its SLOs"
 	req := &alert.CreateAlertRequest{
-		Message: fmt.Sprintf("[%s] %s is not meeting its SLOs", strings.ToUpper(n.Status.String()), n.ApplicationId.Name),
-		Alias:   n.ExternalKey,
-		Source:  "Coroot",
-	}
-	switch n.Status {
-	case model.CRITICAL:
-		req.Priority = alert.P2
-	case model.WARNING:
-		req.Priority = alert.P3
-	case model.INFO:
-		req.Priority = alert.P4
+		Alias:       n.IncidentKey,
+		Message:     msg,
+		Description: msg,
+		Details:     map[string]string{"Application": n.ApplicationId.String(), "Incident": incidentUrl(baseUrl, n)},
+		Source:      n.ProjectId.String(),
+		Priority:    toOpsgeniePriority(n.Status),
 	}
 	if n.Details != nil {
 		for _, r := range n.Details.Reports {
-			req.Description += fmt.Sprintf("• %s / %s: %s\n", r.Name, r.Check, r.Message)
+			req.Details[r.Name+" / "+r.Check] = r.Message
 		}
 		if n.Details.RCASummary != "" {
-			req.Description += fmt.Sprintf("\nRoot Cause: %s\n", n.Details.RCASummary)
-			if n.Details.RCARemediations != "" {
-				req.Description += fmt.Sprintf("\nRemediations: %s\n", utils.Truncate(n.Details.RCARemediations, 2000))
-			}
+			req.Details["Root Cause"] = n.Details.RCASummary
+		}
+		if n.Details.RCARemediations != "" {
+			req.Details["Remediations"] = n.Details.RCARemediations
 		}
 	}
-	req.Description += fmt.Sprintf("\n%s", incidentUrl(baseUrl, n))
 	_, err := og.client.Create(ctx, req)
-	return err
+	if err != nil {
+		return err
+	}
+	n.ExternalKey = req.Alias
+	return nil
 }
 
 func (og *Opsgenie) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
+	displayName := alertDisplayName(n)
 	if n.Status == model.OK {
-		req := &alert.CloseAlertRequest{
-			IdentifierType:  alert.ALIAS,
-			IdentifierValue: n.ExternalKey,
-			Source:          "Coroot",
+		if n.ExternalKey == "" {
+			return nil
 		}
-		_, err := og.client.Close(ctx, req)
+		message := displayName + " alert resolved"
+		if n.Details != nil && n.Details.ResolvedBy != "" {
+			message = fmt.Sprintf("%s alert manually resolved by %s", displayName, n.Details.ResolvedBy)
+		}
+		_, err := og.client.Close(ctx, &alert.CloseAlertRequest{
+			IdentifierType: alert.AliasIdentifier,
+			Identifier:     n.ExternalKey,
+			Note:           message,
+		})
 		return err
 	}
-
-	displayName := alertDisplayName(n)
+	summary := displayName + " alert fired"
+	if n.Details != nil && n.Details.Summary != "" {
+		summary = n.Details.Summary
+	}
 	req := &alert.CreateAlertRequest{
-		Message: fmt.Sprintf("[%s] %s: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary),
-		Alias:   n.ExternalKey,
-		Source:  "Coroot",
+		Alias:       n.AlertId,
+		Message:     summary,
+		Description: summary,
+		Details: map[string]string{
+			"Application": n.ApplicationId.String(),
+			"Alert":       alertNotificationUrl(baseUrl, n),
+		},
+		Source:   n.ProjectId.String(),
+		Priority: toOpsgeniePriority(n.Status),
 	}
-	switch n.Status {
-	case model.CRITICAL:
-		req.Priority = alert.P2
-	case model.WARNING:
-		req.Priority = alert.P3
-	case model.INFO:
-		req.Priority = alert.P4
+	for k, v := range alertMapDetails(n) {
+		req.Details[k] = v
 	}
-	if n.Details != nil {
-		if n.Details.ProjectName != "" {
-			req.Description += fmt.Sprintf("Project: %s\n", n.Details.ProjectName)
-		}
-		if n.Details.RuleName != "" {
-			req.Description += fmt.Sprintf("Alerting rule: %s\n", n.Details.RuleName)
-		}
-		for _, d := range n.Details.Details {
-			req.Description += fmt.Sprintf("%s: %s\n", d.Name, d.Value)
-		}
-	}
-	req.Description += fmt.Sprintf("\n%s", alertUrl(baseUrl, n))
 	_, err := og.client.Create(ctx, req)
-	return err
+	if err != nil {
+		return err
+	}
+	n.ExternalKey = req.Alias
+	return nil
 }
 
 func (og *Opsgenie) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
-	return fmt.Errorf("not supported")
+	return nil
+}
+
+func toOpsgeniePriority(status model.Status) string {
+	switch strings.ToUpper(status.String()) {
+	case strings.ToUpper(model.CRITICAL.String()):
+		return alert.P1.String()
+	case strings.ToUpper(model.WARNING.String()):
+		return alert.P3.String()
+	default:
+		return alert.P5.String()
+	}
 }
