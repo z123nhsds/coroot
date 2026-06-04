@@ -14,7 +14,8 @@ import (
 
 	"github.com/coroot/coroot/utils"
 
-	"github.com/coroot/coroot/db"
+	"github.com/coroot/coroot/utils"
+
 	"github.com/coroot/coroot/model"
 )
 
@@ -39,7 +40,6 @@ type DeploymentTemplateValues struct {
 	URL         string              `json:"url"`
 }
 
-type AlertTemplateValues struct {
 	Status      string              `json:"status"`
 	ProjectName string              `json:"project_name"`
 	Application model.ApplicationId `json:"application"`
@@ -50,26 +50,6 @@ type AlertTemplateValues struct {
 	Duration    string              `json:"duration,omitempty"`
 	ResolvedBy  string              `json:"resolved_by,omitempty"`
 	URL         string              `json:"url"`
-}
-
-func NewWebhook(cfg *db.IntegrationWebhook) *Webhook {
-	return &Webhook{cfg: cfg}
-}
-
-func mergeCustomFields(values any, customFields map[string]string) any {
-	if len(customFields) == 0 {
-		return values
-	}
-	v := reflect.ValueOf(values)
-	t := v.Type()
-
-	existingFields := make(map[string]bool)
-	var fields []reflect.StructField
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		fields = append(fields, reflect.StructField{
-			Name: f.Name,
-			Type: f.Type,
 			Tag:  f.Tag,
 		})
 		existingFields[f.Name] = true
@@ -87,7 +67,11 @@ func mergeCustomFields(values any, customFields map[string]string) any {
 		customKeys = append(customKeys, k)
 		fields = append(fields, reflect.StructField{
 			Name: exported,
-			Type: reflect.TypeOf(""),
+		fields = append(fields, reflect.StructField{
+			Name: f.Name,
+			Type: f.Type,
+			Tag:  f.Tag,
+		})
 			Tag:  reflect.StructTag(`json:"` + k + `"`),
 		})
 	}
@@ -114,7 +98,7 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
 		Status:      strings.ToUpper(n.Status.String()),
 		Application: n.ApplicationId,
 		URL:         incidentUrl(baseUrl, n),
-	}
+		newValue.Field(t.NumField() + i).SetString(customFields[k])
 	if n.Details != nil {
 		values.Reports = n.Details.Reports
 		values.RCASummary = n.Details.RCASummary
@@ -136,7 +120,8 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 	if err != nil {
 		return fmt.Errorf("invalid alert template: %s", err)
 	}
-
+	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+	if err != nil {
 	var data bytes.Buffer
 	values := AlertTemplateValues{
 		Status:      strings.ToUpper(n.Status.String()),
@@ -156,7 +141,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 	if err != nil {
 		return fmt.Errorf("invalid alert template: %s", err)
 	}
-
+		URL:         alertUrl(baseUrl, n),
 	return wh.send(ctx, data.Bytes())
 }
 
@@ -167,12 +152,8 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
 	}
 
 	status := "Deployed"
-	var summary []string
-	switch ds.State {
-	case model.ApplicationDeploymentStateInProgress:
-		status = "In-progress"
-	case model.ApplicationDeploymentStateStuck:
-		status = "Stuck"
+	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
+	if err != nil {
 	case model.ApplicationDeploymentStateCancelled:
 		status = "Cancelled"
 	case model.ApplicationDeploymentStateSummary:
@@ -204,40 +185,14 @@ func (wh *Webhook) send(ctx context.Context, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if wh.cfg.BasicAuth != nil && wh.cfg.BasicAuth.User != "" && wh.cfg.BasicAuth.Password != "" {
+	err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
 		req.SetBasicAuth(wh.cfg.BasicAuth.User, wh.cfg.BasicAuth.Password)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for _, h := range wh.cfg.CustomHeaders {
 		req.Header.Add(h.Key, h.Value)
-	}
+	}, wh.cfg.CustomFields))
+	if err != nil {
 	httpClient := &http.Client{}
 	if wh.cfg.TlsSkipVerify {
 		httpClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= http.StatusBadRequest {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("response status: %s", resp.Status)
-		}
-		return fmt.Errorf("%s: %s", resp.Status, string(body))
-	}
-
-	return nil
-}
-
-var (
-	templateFunctions = template.FuncMap{
-		"json": func(arg any) (string, error) {
-			data, err := json.Marshal(arg)
-			return string(data), err
-		},
-	}
-)

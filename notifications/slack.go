@@ -22,6 +22,9 @@ func NewSlack(token, channel string) *Slack {
 		channel: channel,
 		client:  slack.New(token),
 	}
+		channel: channel,
+		client:  slack.New(token),
+	}
 }
 
 func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
@@ -44,7 +47,9 @@ func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
 	var details []string
 	if n.Details != nil {
 		for _, r := range n.Details.Reports {
-			details = append(details, fmt.Sprintf("• *%s* / %s: %s", r.Name, r.Check, r.Message))
+	blocks := []slack.Block{
+		s.section(s.text("%s", header)),
+	}
 		}
 	}
 	blocks := []slack.Block{
@@ -87,8 +92,8 @@ func (s *Slack) SendDeployment(ctx context.Context, project *db.Project, ds mode
 		status = "Cancelled"
 	}
 
-	var summary *slack.SectionBlock
-	if ds.State == model.ApplicationDeploymentStateSummary {
+			for _, s := range ds.Summary {
+				items += fmt.Sprintf("%s %s\n", s.Emoji(), s.Message)
 		items := "No notable changes"
 		if len(ds.Summary) > 0 {
 			items = ""
@@ -146,7 +151,6 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
 	parts := strings.Split(n.ExternalKey, ":")
 	if len(parts) == 2 {
 		ch, ts = parts[0], parts[1]
-	}
 	if ch == "" {
 		ch = s.channel
 	}
@@ -154,17 +158,13 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
 	var header, snippet string
 	if n.Status == model.OK {
 		resolvedText := "resolved"
-		if n.Details != nil && n.Details.ResolvedBy != "" {
+			header = fmt.Sprintf("<%s|*%s* alert %s> (duration: %s)", alertUrl(baseUrl, n), displayName, resolvedText, n.Details.Duration)
 			resolvedText = fmt.Sprintf("manually resolved by *%s*", n.Details.ResolvedBy)
 		}
-		if n.Details != nil && n.Details.Duration != "" {
+			header = fmt.Sprintf("<%s|*%s* alert %s>", alertUrl(baseUrl, n), displayName, resolvedText)
 			header = fmt.Sprintf("<%s|*%s* alert %s> (duration: %s)", alertUrl(baseUrl, n), displayName, resolvedText, n.Details.Duration)
 			snippet = fmt.Sprintf("%s alert %s (duration: %s)", displayName, resolvedText, n.Details.Duration)
 		} else {
-			header = fmt.Sprintf("<%s|*%s* alert %s>", alertUrl(baseUrl, n), displayName, resolvedText)
-			snippet = fmt.Sprintf("%s alert %s", displayName, resolvedText)
-		}
-	} else {
 		header = fmt.Sprintf("[%s] <%s|*%s*: %s>", strings.ToUpper(n.Status.String()), alertUrl(baseUrl, n), displayName, n.Details.Summary)
 		snippet = fmt.Sprintf("%s: %s", displayName, n.Details.Summary)
 	}
@@ -187,16 +187,6 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
 	blocks := []slack.Block{
 		s.section(s.text("%s", header)),
 	}
-	if len(details) > 0 {
-		blocks = append(blocks, s.section(s.text("%s", strings.Join(details, "\n"))))
-	}
-	body := s.body(n.Status.Color(), snippet, blocks...)
-	opts := []slack.MsgOption{body, slack.MsgOptionDisableLinkUnfurl()}
-	if ts != "" {
-		opts = append(opts, slack.MsgOptionTS(ts), slack.MsgOptionBroadcast())
-	}
-	var err error
-	ch, ts, err = s.client.PostMessageContext(ctx, ch, opts...)
 	if err != nil {
 		return fmt.Errorf("slack error: %w", err)
 	}
@@ -215,7 +205,11 @@ func (s *Slack) body(color string, fallback string, blocks ...slack.Block) slack
 func (s *Slack) section(text *slack.TextBlockObject, fields ...*slack.TextBlockObject) *slack.SectionBlock {
 	return slack.NewSectionBlock(text, fields, nil)
 }
-
+	return slack.MsgOptionAttachments(slack.Attachment{
+		Color:    color,
+		Blocks:   slack.Blocks{BlockSet: blocks},
+		Fallback: fallback,
+	})
 func (s *Slack) text(format string, a ...any) *slack.TextBlockObject {
 	text := format
 	if len(a) > 0 {

@@ -27,7 +27,6 @@ const (
 	ScopeProjectCosts                 Scope = "project.costs"
 	ScopeProjectAnomalies             Scope = "project.anomalies"
 	ScopeProjectRisks                 Scope = "project.risks"
-	ScopeApplication                  Scope = "project.application"
 	ScopeNode                         Scope = "project.node"
 	ScopeDashboards                   Scope = "project.dashboards"
 	ScopeDashboard                    Scope = "project.dashboard"

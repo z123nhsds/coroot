@@ -82,6 +82,7 @@ func (i *NotificationIntegrations) Validate() error {
 
 	return nil
 
+
 }
 
 type IntegrationInfo struct {
@@ -240,11 +241,9 @@ type IntegrationWebhook struct {
 	CustomFields       map[string]string `json:"custom_fields" yaml:"customFields"`
 	Incidents          bool              `json:"incidents" yaml:"incidents"`
 	Deployments        bool              `json:"deployments" yaml:"deployments"`
-	Alerts             *bool             `json:"alerts,omitempty" yaml:"alerts,omitempty"`
 	IncidentTemplate   string            `json:"incident_template" yaml:"incidentTemplate"`
 	DeploymentTemplate string            `json:"deployment_template" yaml:"deploymentTemplate"`
 	AlertTemplate      string            `json:"alert_template" yaml:"alertTemplate"`
-}
 
 func (i *IntegrationWebhook) Validate() error {
 	if i.Url == "" {
@@ -259,9 +258,6 @@ func (i *IntegrationWebhook) Validate() error {
 	if i.Alerts != nil && *i.Alerts && i.AlertTemplate == "" {
 		return fmt.Errorf("alert template is required")
 	}
-	return nil
-}
-
 type IntegrationAWS struct {
 	Region          string `json:"region"`
 	AccessKeyID     string `json:"access_key_id"`

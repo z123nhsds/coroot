@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"time"
-
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/timeseries"
@@ -79,6 +77,15 @@ func incidentDetails(app *model.Application, incident *model.ApplicationIncident
 		}
 	} else {
 		//for _, r := range app.Reports {
+	} else {
+		//for _, r := range app.Reports {
+		//if r.Name != model.AuditReportSLO {
+		//	continue
+		//}
+		//for _, ch := range r.Checks {
+		//	reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
+		//}
+		//}
 		//if r.Name != model.AuditReportSLO {
 		//	continue
 		//}
@@ -99,19 +106,4 @@ func incidentDetails(app *model.Application, incident *model.ApplicationIncident
 }
 
 func incidentUrl(baseUrl string, n *db.IncidentNotification) string {
-	return fmt.Sprintf("%s/p/%s/incidents?incident=%s", baseUrl, n.ProjectId, n.IncidentKey)
-}
-
-func deploymentUrl(baseUrl string, projectId db.ProjectId, d *model.ApplicationDeployment) string {
-	return fmt.Sprintf("%s/p/%s/app/%s/Deployments#%s", baseUrl, projectId, d.ApplicationId.String(), d.Id())
-}
-
-func alertDisplayName(n *db.AlertNotification) string {
-	if n.ApplicationId.Name != "" {
-		return n.ApplicationId.Name
-	}
-	if n.Details != nil && n.Details.RuleName != "" {
-		return n.Details.RuleName
-	}
-	return "Alert"
 }

@@ -71,7 +71,6 @@ type Stats struct {
 		Instances           int                                 `json:"instances"`
 		Deployments         int                                 `json:"deployments"`
 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
-		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
 	} `json:"infra"`
 	UX struct {
 		WorldLoadTimeAvg  float32                    `json:"world_load_time_avg"`
@@ -525,13 +524,6 @@ func (c *Collector) collect() Stats {
 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
 
-	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
-
-	return stats
-}
-
-func corootComponents(components []*model.Application) []*Component {
-	var res []*Component
 	for _, a := range components {
 		aa := &Component{Id: a.Id}
 		res = append(res, aa)

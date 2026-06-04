@@ -1,0 +1,912 @@
+diff --git a/db/alert_notification.go b/db/alert_notification.go
+index 63929bf..2482ce6 100644
+--- a/db/alert_notification.go
++++ b/db/alert_notification.go
+@@ -30,8 +30,6 @@ type AlertNotificationDetails struct {
+ 	Details     []model.AlertDetail `json:"details,omitempty"`
+ 	Duration    string              `json:"duration,omitempty"`
+ 	ResolvedBy  string              `json:"resolved_by,omitempty"`
+-}
+-
+ func (n *AlertNotification) Migrate(m *Migrator) error {
+ 	return m.Exec(`
+ 	CREATE TABLE IF NOT EXISTS alert_notification (
+diff --git a/db/integrations.go b/db/integrations.go
+index ebc8fde..5dd6f9e 100644
+--- a/db/integrations.go
++++ b/db/integrations.go
+@@ -82,6 +82,7 @@ func (i *NotificationIntegrations) Validate() error {
+ 
+ 	return nil
+ 
++
+ }
+ 
+ type IntegrationInfo struct {
+@@ -240,11 +241,9 @@ type IntegrationWebhook struct {
+ 	CustomFields       map[string]string `json:"custom_fields" yaml:"customFields"`
+ 	Incidents          bool              `json:"incidents" yaml:"incidents"`
+ 	Deployments        bool              `json:"deployments" yaml:"deployments"`
+-	Alerts             *bool             `json:"alerts,omitempty" yaml:"alerts,omitempty"`
+ 	IncidentTemplate   string            `json:"incident_template" yaml:"incidentTemplate"`
+ 	DeploymentTemplate string            `json:"deployment_template" yaml:"deploymentTemplate"`
+ 	AlertTemplate      string            `json:"alert_template" yaml:"alertTemplate"`
+-}
+ 
+ func (i *IntegrationWebhook) Validate() error {
+ 	if i.Url == "" {
+@@ -259,9 +258,6 @@ func (i *IntegrationWebhook) Validate() error {
+ 	if i.Alerts != nil && *i.Alerts && i.AlertTemplate == "" {
+ 		return fmt.Errorf("alert template is required")
+ 	}
+-	return nil
+-}
+-
+ type IntegrationAWS struct {
+ 	Region          string `json:"region"`
+ 	AccessKeyID     string `json:"access_key_id"`
+diff --git a/notifications/alerts.go b/notifications/alerts.go
+index e37ae50..513a34d 100644
+--- a/notifications/alerts.go
++++ b/notifications/alerts.go
+@@ -215,6 +215,10 @@ func alertUrl(baseUrl string, n *db.AlertNotification) string {
+ 	return fmt.Sprintf("%s/p/%s/alerts?alert=%s", baseUrl, n.ProjectId, n.AlertId)
+ }
+ 
++func alertUrl(baseUrl string, n *db.AlertNotification) string {
++	return fmt.Sprintf("%s/p/%s/alerts?alert=%s", baseUrl, n.ProjectId, n.AlertId)
++}
++
+ func EnqueueResolvedAlerts(database *db.DB, project *db.Project, alerts []*model.Alert, rule *model.AlertingRule) {
+ 	now := timeseries.Now()
+ 	for _, alert := range alerts {
+diff --git a/notifications/notifications.go b/notifications/notifications.go
+index b90fab3..2cc491a 100644
+--- a/notifications/notifications.go
++++ b/notifications/notifications.go
+@@ -4,8 +4,6 @@ import (
+ 	"cmp"
+ 	"context"
+ 	"fmt"
+-	"time"
+-
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/timeseries"
+@@ -79,6 +77,15 @@ func incidentDetails(app *model.Application, incident *model.ApplicationIncident
+ 		}
+ 	} else {
+ 		//for _, r := range app.Reports {
++	} else {
++		//for _, r := range app.Reports {
++		//if r.Name != model.AuditReportSLO {
++		//	continue
++		//}
++		//for _, ch := range r.Checks {
++		//	reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
++		//}
++		//}
+ 		//if r.Name != model.AuditReportSLO {
+ 		//	continue
+ 		//}
+@@ -99,19 +106,4 @@ func incidentDetails(app *model.Application, incident *model.ApplicationIncident
+ }
+ 
+ func incidentUrl(baseUrl string, n *db.IncidentNotification) string {
+-	return fmt.Sprintf("%s/p/%s/incidents?incident=%s", baseUrl, n.ProjectId, n.IncidentKey)
+-}
+-
+-func deploymentUrl(baseUrl string, projectId db.ProjectId, d *model.ApplicationDeployment) string {
+-	return fmt.Sprintf("%s/p/%s/app/%s/Deployments#%s", baseUrl, projectId, d.ApplicationId.String(), d.Id())
+-}
+-
+-func alertDisplayName(n *db.AlertNotification) string {
+-	if n.ApplicationId.Name != "" {
+-		return n.ApplicationId.Name
+-	}
+-	if n.Details != nil && n.Details.RuleName != "" {
+-		return n.Details.RuleName
+-	}
+-	return "Alert"
+ }
+diff --git a/notifications/opsgenie.go b/notifications/opsgenie.go
+index 84b09e7..2ec1d4b 100644
+--- a/notifications/opsgenie.go
++++ b/notifications/opsgenie.go
+@@ -4,11 +4,14 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
++	"io"
+ 	"strings"
+-
+-	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/utils"
++	"github.com/coroot/coroot/utils"
++	"github.com/opsgenie/opsgenie-go-sdk-v2/alert"
++	"github.com/opsgenie/opsgenie-go-sdk-v2/client"
++	"github.com/sirupsen/logrus"
+ 	"github.com/opsgenie/opsgenie-go-sdk-v2/alert"
+ 	"github.com/opsgenie/opsgenie-go-sdk-v2/client"
+ 	"github.com/sirupsen/logrus"
+@@ -16,34 +19,31 @@ import (
+ 
+ type Opsgenie struct {
+ 	client *alert.Client
+-}
+-
+-func NewOpsgenie(apiKey string, euInstance bool) *Opsgenie {
+ 	logger := logrus.New()
+ 	logger.SetOutput(io.Discard)
+ 	cfg := &client.Config{
+ 		ApiKey: apiKey,
+ 		Logger: logger,
+ 	}
++
++		cfg.OpsGenieAPIURL = client.API_URL_EU
++	logger := logrus.New()
++	c, _ := alert.NewClient(cfg)
++	return &Opsgenie{client: c}
+ 	if euInstance {
+ 		cfg.OpsGenieAPIURL = client.API_URL_EU
+ 	}
+ 	c, _ := alert.NewClient(cfg)
+-	return &Opsgenie{client: c}
+-}
+-
+-func (og *Opsgenie) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+-	if n.Status == model.OK {
+ 		req := &alert.CloseAlertRequest{
+ 			IdentifierType:  alert.ALIAS,
+ 			IdentifierValue: n.ExternalKey,
+ 			Source:          "Coroot",
+ 		}
+ 		_, err := og.client.Close(ctx, req)
+-		return err
++			Source:          "Coroot",
++		}
++		_, err := og.client.Close(ctx, req)
+ 	}
+-
+-	req := &alert.CreateAlertRequest{
+ 		Message: fmt.Sprintf("[%s] %s is not meeting its SLOs", strings.ToUpper(n.Status.String()), n.ApplicationId.Name),
+ 		Alias:   n.ExternalKey,
+ 		Source:  "Coroot",
+@@ -55,36 +55,36 @@ func (og *Opsgenie) SendIncident(ctx context.Context, baseUrl string, n *db.Inci
+ 		req.Priority = alert.P3
+ 	case model.INFO:
+ 		req.Priority = alert.P4
+-	}
+-	if n.Details != nil {
+-		for _, r := range n.Details.Reports {
++	switch n.Status {
++	case model.CRITICAL:
++		req.Priority = alert.P2
+ 			req.Description += fmt.Sprintf("• %s / %s: %s\n", r.Name, r.Check, r.Message)
+-		}
+-		if n.Details.RCASummary != "" {
++		req.Priority = alert.P3
++	case model.INFO:
+ 			req.Description += fmt.Sprintf("\nRoot Cause: %s\n", n.Details.RCASummary)
+ 			if n.Details.RCARemediations != "" {
+ 				req.Description += fmt.Sprintf("\nRemediations: %s\n", utils.Truncate(n.Details.RCARemediations, 2000))
+ 			}
++			req.Description += fmt.Sprintf("• %s / %s: %s\n", r.Name, r.Check, r.Message)
+ 		}
++	req.Description += fmt.Sprintf("\n%s", incidentUrl(baseUrl, n))
++		if n.Details.RCASummary != "" {
++	return err
+ 	}
+ 	req.Description += fmt.Sprintf("\n%s", incidentUrl(baseUrl, n))
+ 	_, err := og.client.Create(ctx, req)
+-	return err
+ }
+-
+-func (og *Opsgenie) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
+-	if n.Status == model.OK {
+ 		req := &alert.CloseAlertRequest{
+ 			IdentifierType:  alert.ALIAS,
+ 			IdentifierValue: n.ExternalKey,
+ 			Source:          "Coroot",
+ 		}
+ 		_, err := og.client.Close(ctx, req)
+-		return err
+-	}
+-
+ 	displayName := alertDisplayName(n)
+ 	req := &alert.CreateAlertRequest{
++
++	displayName := alertDisplayName(n)
++	switch n.Status {
+ 		Message: fmt.Sprintf("[%s] %s: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary),
+ 		Alias:   n.ExternalKey,
+ 		Source:  "Coroot",
+@@ -109,6 +109,8 @@ func (og *Opsgenie) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNo
+ 		}
+ 	}
+ 	req.Description += fmt.Sprintf("\n%s", alertUrl(baseUrl, n))
++		}
++	return err
+ 	_, err := og.client.Create(ctx, req)
+ 	return err
+ }
+diff --git a/notifications/pagerduty.go b/notifications/pagerduty.go
+index 2127cf5..ccce9e1 100644
+--- a/notifications/pagerduty.go
++++ b/notifications/pagerduty.go
+@@ -9,9 +9,9 @@ import (
+ 	"github.com/coroot/coroot/db"
+ 	"github.com/coroot/coroot/model"
+ 	"github.com/coroot/coroot/utils"
++	"github.com/coroot/coroot/utils"
+ )
+ 
+-type Pagerduty struct {
+ 	integrationKey string
+ }
+ 
+@@ -51,17 +51,17 @@ func (pd *Pagerduty) SendIncident(ctx context.Context, baseUrl string, n *db.Inc
+ 				e.Payload.Details = details
+ 			}
+ 		}
+-	}
++}
+ 	_, err := pagerduty.ManageEventWithContext(ctx, e)
+ 	return err
+-}
+-
+-func (pd *Pagerduty) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotification) error {
++	if n.Status == model.OK {
++		e.Action = "resolve"
++	} else {
+ 	e := pagerduty.V2Event{
+ 		RoutingKey: pd.integrationKey,
+-		DedupKey:   n.ExternalKey,
++		if n.Details != nil {
++		}
+ 	}
+-	if n.Status == model.OK {
+ 		e.Action = "resolve"
+ 	} else {
+ 		e.Action = "trigger"
+@@ -73,27 +73,4 @@ func (pd *Pagerduty) SendAlert(ctx context.Context, baseUrl string, n *db.AlertN
+ 			Source:    "Coroot",
+ 			Severity:  n.Status.String(),
+ 			Timestamp: n.Timestamp.ToStandard().String(),
+-		}
+-		if n.Details != nil {
+-			details := map[string]string{}
+-			if n.Details.ProjectName != "" {
+-				details["Project"] = n.Details.ProjectName
+-			}
+-			if n.Details.RuleName != "" {
+-				details["Alerting rule"] = n.Details.RuleName
+-			}
+-			for _, d := range n.Details.Details {
+-				details[d.Name] = d.Value
+-			}
+-			if len(details) > 0 {
+-				e.Payload.Details = details
+-			}
+-		}
+-	}
+-	_, err := pagerduty.ManageEventWithContext(ctx, e)
+-	return err
+-}
+-
+-func (pd *Pagerduty) SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error {
+-	return fmt.Errorf("not supported")
+ }
+diff --git a/notifications/slack.go b/notifications/slack.go
+index 033f7a6..8a88290 100644
+--- a/notifications/slack.go
++++ b/notifications/slack.go
+@@ -22,6 +22,9 @@ func NewSlack(token, channel string) *Slack {
+ 		channel: channel,
+ 		client:  slack.New(token),
+ 	}
++		channel: channel,
++		client:  slack.New(token),
++	}
+ }
+ 
+ func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+@@ -44,7 +47,9 @@ func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
+ 	var details []string
+ 	if n.Details != nil {
+ 		for _, r := range n.Details.Reports {
+-			details = append(details, fmt.Sprintf("• *%s* / %s: %s", r.Name, r.Check, r.Message))
++	blocks := []slack.Block{
++		s.section(s.text("%s", header)),
++	}
+ 		}
+ 	}
+ 	blocks := []slack.Block{
+@@ -87,8 +92,8 @@ func (s *Slack) SendDeployment(ctx context.Context, project *db.Project, ds mode
+ 		status = "Cancelled"
+ 	}
+ 
+-	var summary *slack.SectionBlock
+-	if ds.State == model.ApplicationDeploymentStateSummary {
++			for _, s := range ds.Summary {
++				items += fmt.Sprintf("%s %s\n", s.Emoji(), s.Message)
+ 		items := "No notable changes"
+ 		if len(ds.Summary) > 0 {
+ 			items = ""
+@@ -146,7 +151,6 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 	parts := strings.Split(n.ExternalKey, ":")
+ 	if len(parts) == 2 {
+ 		ch, ts = parts[0], parts[1]
+-	}
+ 	if ch == "" {
+ 		ch = s.channel
+ 	}
+@@ -154,17 +158,13 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 	var header, snippet string
+ 	if n.Status == model.OK {
+ 		resolvedText := "resolved"
+-		if n.Details != nil && n.Details.ResolvedBy != "" {
++			header = fmt.Sprintf("<%s|*%s* alert %s> (duration: %s)", alertUrl(baseUrl, n), displayName, resolvedText, n.Details.Duration)
+ 			resolvedText = fmt.Sprintf("manually resolved by *%s*", n.Details.ResolvedBy)
+ 		}
+-		if n.Details != nil && n.Details.Duration != "" {
++			header = fmt.Sprintf("<%s|*%s* alert %s>", alertUrl(baseUrl, n), displayName, resolvedText)
+ 			header = fmt.Sprintf("<%s|*%s* alert %s> (duration: %s)", alertUrl(baseUrl, n), displayName, resolvedText, n.Details.Duration)
+ 			snippet = fmt.Sprintf("%s alert %s (duration: %s)", displayName, resolvedText, n.Details.Duration)
+ 		} else {
+-			header = fmt.Sprintf("<%s|*%s* alert %s>", alertUrl(baseUrl, n), displayName, resolvedText)
+-			snippet = fmt.Sprintf("%s alert %s", displayName, resolvedText)
+-		}
+-	} else {
+ 		header = fmt.Sprintf("[%s] <%s|*%s*: %s>", strings.ToUpper(n.Status.String()), alertUrl(baseUrl, n), displayName, n.Details.Summary)
+ 		snippet = fmt.Sprintf("%s: %s", displayName, n.Details.Summary)
+ 	}
+@@ -187,16 +187,6 @@ func (s *Slack) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 	blocks := []slack.Block{
+ 		s.section(s.text("%s", header)),
+ 	}
+-	if len(details) > 0 {
+-		blocks = append(blocks, s.section(s.text("%s", strings.Join(details, "\n"))))
+-	}
+-	body := s.body(n.Status.Color(), snippet, blocks...)
+-	opts := []slack.MsgOption{body, slack.MsgOptionDisableLinkUnfurl()}
+-	if ts != "" {
+-		opts = append(opts, slack.MsgOptionTS(ts), slack.MsgOptionBroadcast())
+-	}
+-	var err error
+-	ch, ts, err = s.client.PostMessageContext(ctx, ch, opts...)
+ 	if err != nil {
+ 		return fmt.Errorf("slack error: %w", err)
+ 	}
+@@ -215,7 +205,11 @@ func (s *Slack) body(color string, fallback string, blocks ...slack.Block) slack
+ func (s *Slack) section(text *slack.TextBlockObject, fields ...*slack.TextBlockObject) *slack.SectionBlock {
+ 	return slack.NewSectionBlock(text, fields, nil)
+ }
+-
++	return slack.MsgOptionAttachments(slack.Attachment{
++		Color:    color,
++		Blocks:   slack.Blocks{BlockSet: blocks},
++		Fallback: fallback,
++	})
+ func (s *Slack) text(format string, a ...any) *slack.TextBlockObject {
+ 	text := format
+ 	if len(a) > 0 {
+diff --git a/notifications/teams.go b/notifications/teams.go
+index 7248cd6..ff49bbd 100644
+--- a/notifications/teams.go
++++ b/notifications/teams.go
+@@ -24,6 +24,9 @@ func NewTeams(webhookUrl string) *Teams {
+ 		webhookUrl: webhookUrl,
+ 		client:     client,
+ 	}
++		webhookUrl: webhookUrl,
++		client:     client,
++	}
+ }
+ 
+ func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
+@@ -53,6 +56,7 @@ func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
+ 		return err
+ 	}
+ 	action, err := adaptivecard.NewActionOpenURL(incidentUrl(baseUrl, n), "View incident")
++	err = card.AddAction(true, action)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -60,12 +64,14 @@ func (t *Teams) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
+ 	if err != nil {
+ 		return err
+ 	}
+-	msg, err := adaptivecard.NewMessageFromCard(card)
++	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
++		return err
++	}
++	return nil
+ 	if err != nil {
+ 		return err
+ 	}
+ 	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
+-		return err
+ 	}
+ 	return nil
+ }
+@@ -78,12 +84,6 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 		if n.Details != nil && n.Details.ResolvedBy != "" {
+ 			resolvedText = fmt.Sprintf("manually resolved by **%s**", n.Details.ResolvedBy)
+ 		}
+-		if n.Details != nil && n.Details.Duration != "" {
+-			title = fmt.Sprintf("**%s** alert %s (duration: %s)", displayName, resolvedText, n.Details.Duration)
+-		} else {
+-			title = fmt.Sprintf("**%s** alert %s", displayName, resolvedText)
+-		}
+-	} else {
+ 		title = fmt.Sprintf("[%s] **%s**: %s", strings.ToUpper(n.Status.String()), displayName, n.Details.Summary)
+ 	}
+ 	text := ""
+@@ -102,8 +102,29 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 			}
+ 		}
+ 	}
++	}
++	text := ""
++	if n.Details != nil {
++		if n.Details.ProjectName != "" {
++			text += fmt.Sprintf("**Project**: %s\n\n", n.Details.ProjectName)
++		}
++		if n.Details.RuleName != "" {
++	action, err := adaptivecard.NewActionOpenURL(alertUrl(baseUrl, n), "View alert")
++		}
++		for _, d := range n.Details.Details {
++			if d.Code {
++	err = card.AddAction(true, action)
++	if err != nil {
++			} else {
++				text += fmt.Sprintf("**%s**: %s\n\n", d.Name, d.Value)
++			}
++		}
++	}
+ 	if text == "" {
+-		text = " "
++	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
++		return err
++	}
++	return nil
+ 	}
+ 	card, err := adaptivecard.NewTextBlockCard(text, title, true)
+ 	if err != nil {
+@@ -120,6 +141,7 @@ func (t *Teams) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNotifi
+ 	msg, err := adaptivecard.NewMessageFromCard(card)
+ 	if err != nil {
+ 		return err
++
+ 	}
+ 	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
+ 		return err
+@@ -143,14 +165,19 @@ func (t *Teams) SendDeployment(ctx context.Context, project *db.Project, ds mode
+ 	title := fmt.Sprintf("Deployment of **%s** to **%s**", d.ApplicationId.Name, project.Name)
+ 
+ 	text := fmt.Sprintf("**Status**: %s\n\n", status)
+-	text += fmt.Sprintf("**Version**: %s\n\n", d.Version())
++	err = card.AddAction(true, action)
++	if err != nil {
+ 	if ds.State == model.ApplicationDeploymentStateSummary {
+ 		summary := ""
+ 		if len(ds.Summary) > 0 {
+ 			for _, s := range ds.Summary {
+ 				summary += fmt.Sprintf("* %s %s\n", s.Emoji(), s.Message)
+ 			}
+-		} else {
++	if err = t.client.SendWithContext(ctx, t.webhookUrl, msg); err != nil {
++		return err
++	}
++
++	return nil
+ 			summary = "No notable changes"
+ 		}
+ 		text += "**Summary:**\n\n"
+diff --git a/notifications/webhook.go b/notifications/webhook.go
+index 0fe5d99..0f03aa9 100644
+--- a/notifications/webhook.go
++++ b/notifications/webhook.go
+@@ -14,7 +14,8 @@ import (
+ 
+ 	"github.com/coroot/coroot/utils"
+ 
+-	"github.com/coroot/coroot/db"
++	"github.com/coroot/coroot/utils"
++
+ 	"github.com/coroot/coroot/model"
+ )
+ 
+@@ -39,7 +40,6 @@ type DeploymentTemplateValues struct {
+ 	URL         string              `json:"url"`
+ }
+ 
+-type AlertTemplateValues struct {
+ 	Status      string              `json:"status"`
+ 	ProjectName string              `json:"project_name"`
+ 	Application model.ApplicationId `json:"application"`
+@@ -50,26 +50,6 @@ type AlertTemplateValues struct {
+ 	Duration    string              `json:"duration,omitempty"`
+ 	ResolvedBy  string              `json:"resolved_by,omitempty"`
+ 	URL         string              `json:"url"`
+-}
+-
+-func NewWebhook(cfg *db.IntegrationWebhook) *Webhook {
+-	return &Webhook{cfg: cfg}
+-}
+-
+-func mergeCustomFields(values any, customFields map[string]string) any {
+-	if len(customFields) == 0 {
+-		return values
+-	}
+-	v := reflect.ValueOf(values)
+-	t := v.Type()
+-
+-	existingFields := make(map[string]bool)
+-	var fields []reflect.StructField
+-	for i := 0; i < t.NumField(); i++ {
+-		f := t.Field(i)
+-		fields = append(fields, reflect.StructField{
+-			Name: f.Name,
+-			Type: f.Type,
+ 			Tag:  f.Tag,
+ 		})
+ 		existingFields[f.Name] = true
+@@ -87,7 +67,11 @@ func mergeCustomFields(values any, customFields map[string]string) any {
+ 		customKeys = append(customKeys, k)
+ 		fields = append(fields, reflect.StructField{
+ 			Name: exported,
+-			Type: reflect.TypeOf(""),
++		fields = append(fields, reflect.StructField{
++			Name: f.Name,
++			Type: f.Type,
++			Tag:  f.Tag,
++		})
+ 			Tag:  reflect.StructTag(`json:"` + k + `"`),
+ 		})
+ 	}
+@@ -114,7 +98,7 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
+ 		Status:      strings.ToUpper(n.Status.String()),
+ 		Application: n.ApplicationId,
+ 		URL:         incidentUrl(baseUrl, n),
+-	}
++		newValue.Field(t.NumField() + i).SetString(customFields[k])
+ 	if n.Details != nil {
+ 		values.Reports = n.Details.Reports
+ 		values.RCASummary = n.Details.RCASummary
+@@ -136,7 +120,8 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	if err != nil {
+ 		return fmt.Errorf("invalid alert template: %s", err)
+ 	}
+-
++	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
++	if err != nil {
+ 	var data bytes.Buffer
+ 	values := AlertTemplateValues{
+ 		Status:      strings.ToUpper(n.Status.String()),
+@@ -156,7 +141,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
+ 	if err != nil {
+ 		return fmt.Errorf("invalid alert template: %s", err)
+ 	}
+-
++		URL:         alertUrl(baseUrl, n),
+ 	return wh.send(ctx, data.Bytes())
+ }
+ 
+@@ -167,12 +152,8 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
+ 	}
+ 
+ 	status := "Deployed"
+-	var summary []string
+-	switch ds.State {
+-	case model.ApplicationDeploymentStateInProgress:
+-		status = "In-progress"
+-	case model.ApplicationDeploymentStateStuck:
+-		status = "Stuck"
++	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
++	if err != nil {
+ 	case model.ApplicationDeploymentStateCancelled:
+ 		status = "Cancelled"
+ 	case model.ApplicationDeploymentStateSummary:
+@@ -204,40 +185,14 @@ func (wh *Webhook) send(ctx context.Context, data []byte) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if wh.cfg.BasicAuth != nil && wh.cfg.BasicAuth.User != "" && wh.cfg.BasicAuth.Password != "" {
++	err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
+ 		req.SetBasicAuth(wh.cfg.BasicAuth.User, wh.cfg.BasicAuth.Password)
+ 	}
+ 	req.Header.Set("Content-Type", "application/json")
+ 	for _, h := range wh.cfg.CustomHeaders {
+ 		req.Header.Add(h.Key, h.Value)
+-	}
++	}, wh.cfg.CustomFields))
++	if err != nil {
+ 	httpClient := &http.Client{}
+ 	if wh.cfg.TlsSkipVerify {
+ 		httpClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+-	}
+-
+-	resp, err := httpClient.Do(req)
+-	if err != nil {
+-		return err
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode >= http.StatusBadRequest {
+-		body, err := io.ReadAll(resp.Body)
+-		if err != nil {
+-			return fmt.Errorf("response status: %s", resp.Status)
+-		}
+-		return fmt.Errorf("%s: %s", resp.Status, string(body))
+-	}
+-
+-	return nil
+-}
+-
+-var (
+-	templateFunctions = template.FuncMap{
+-		"json": func(arg any) (string, error) {
+-			data, err := json.Marshal(arg)
+-			return string(data), err
+-		},
+-	}
+-)
+diff --git a/rbac/action.go b/rbac/action.go
+index 3d98f72..0e5119e 100644
+--- a/rbac/action.go
++++ b/rbac/action.go
+@@ -27,7 +27,6 @@ const (
+ 	ScopeProjectCosts                 Scope = "project.costs"
+ 	ScopeProjectAnomalies             Scope = "project.anomalies"
+ 	ScopeProjectRisks                 Scope = "project.risks"
+-	ScopeApplication                  Scope = "project.application"
+ 	ScopeNode                         Scope = "project.node"
+ 	ScopeDashboards                   Scope = "project.dashboards"
+ 	ScopeDashboard                    Scope = "project.dashboard"
+diff --git a/rbac/actions.go b/rbac/actions.go
+index 153b192..a9d0677 100644
+--- a/rbac/actions.go
++++ b/rbac/actions.go
+@@ -76,7 +76,6 @@ func (as ProjectActionSet) List() []Action {
+ 		as.Anomalies().View(),
+ 		as.Risks().View(),
+ 		as.Risks().Edit(),
+-		as.Application("*", "*", "*", "*").View(),
+ 		as.Node("*").View(),
+ 		as.Dashboards().Edit(),
+ 		as.Dashboard("*").View(),
+@@ -139,10 +138,6 @@ func (as ProjectActionSet) Risks() ProjectAction {
+ 	return ProjectAction{project: &as, scope: ScopeProjectRisks}
+ }
+ 
+-func (as ProjectActionSet) Application(category model.ApplicationCategory, namespace string, kind model.ApplicationKind, name string) ApplicationActionSet {
+-	return ApplicationActionSet{project: &as, category: category, namespace: namespace, kind: kind, name: name}
+-}
+-
+ func (as ProjectActionSet) Node(name string) NodeActionSet {
+ 	return NodeActionSet{project: &as, name: name}
+ }
+diff --git a/rbac/role.go b/rbac/role.go
+index c78f404..d2e4fcc 100644
+--- a/rbac/role.go
++++ b/rbac/role.go
+@@ -8,7 +8,6 @@ const (
+ 	RoleAdmin  RoleName = "Admin"
+ 	RoleEditor RoleName = "Editor"
+ 	RoleViewer RoleName = "Viewer"
+-)
+ 
+ var (
+ 	Roles = []Role{
+@@ -26,15 +25,9 @@ var (
+ 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
+ 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
+ 		),
+-		NewRole(RoleViewer,
+ 			NewPermission(ScopeAll, ActionView, nil),
+ 		),
+ 	}
+-)
+-
+-type RoleName string
+-
+-func (r RoleName) Valid(roles []Role) bool {
+ 	return slices.ContainsFunc(roles, func(role Role) bool { return role.Name == r })
+ }
+ 
+diff --git a/stats/stats.go b/stats/stats.go
+index c6515f2..9d2db81 100644
+--- a/stats/stats.go
++++ b/stats/stats.go
+@@ -71,7 +71,6 @@ type Stats struct {
+ 		Instances           int                                 `json:"instances"`
+ 		Deployments         int                                 `json:"deployments"`
+ 		DeploymentSummaries map[string]int                      `json:"deployment_summaries"`
+-		KernelVersions      *utils.StringSet                    `json:"kernel_versions"`
+ 	} `json:"infra"`
+ 	UX struct {
+ 		WorldLoadTimeAvg  float32                    `json:"world_load_time_avg"`
+@@ -525,13 +524,6 @@ func (c *Collector) collect() Stats {
+ 	stats.UX.WorldLoadTimeAvg = avgDuration(loadTime)
+ 	stats.UX.AuditTimeAvg = avgDuration(auditTime)
+ 
+-	stats.UX.SentNotifications = c.db.GetSentIncidentNotificationsStat(now.Add(-timeseries.Duration(collectInterval.Seconds())))
+-
+-	return stats
+-}
+-
+-func corootComponents(components []*model.Application) []*Component {
+-	var res []*Component
+ 	for _, a := range components {
+ 		aa := &Component{Id: a.Id}
+ 		res = append(res, aa)
+diff --git a/watchers/deployments.go b/watchers/deployments.go
+index 94525a2..66745b1 100644
+--- a/watchers/deployments.go
++++ b/watchers/deployments.go
+@@ -3,7 +3,6 @@ package watchers
+ import (
+ 	"cmp"
+ 	"context"
+-	"fmt"
+ 	"sort"
+ 	"time"
+ 
+@@ -19,10 +18,7 @@ import (
+ 
+ const (
+ 	sendTimeout = 30 * time.Second
+-)
+-
+-type Deployments struct {
+-	db      *db.DB
++	sendTimeout = 30 * time.Second
+ 	pricing *cloud_pricing.Manager
+ }
+ 
+@@ -38,7 +34,6 @@ func (w *Deployments) Check(project *db.Project, world *model.World) {
+ 	klog.Infof("%s: checked %d apps in %s", project.Id, apps, time.Since(start).Truncate(time.Millisecond))
+ }
+ 
+-func (w *Deployments) discoverAndSaveDeployments(project *db.Project, world *model.World) int {
+ 	var apps int
+ 	for _, app := range world.Applications {
+ 		if app.Id.Kind != model.ApplicationKindDeployment {
+@@ -100,134 +95,6 @@ func (w *Deployments) sendNotifications(project *db.Project, world *model.World)
+ 	now := world.Ctx.To
+ 	categories := project.GetApplicationCategories()
+ 	for _, app := range world.Applications {
+-		categorySettings := categories[app.Category]
+-		if categorySettings == nil {
+-			continue
+-		}
+-		notificationSettings := categorySettings.NotificationSettings.Deployments
+-		if !notificationSettings.Enabled {
+-			continue
+-		}
+-
+-		for _, ds := range model.CalcApplicationDeploymentStatuses(app, world.CheckConfigs, now) {
+-			d := ds.Deployment
+-			if now.Sub(d.StartedAt) > timeseries.Day {
+-				continue
+-			}
+-			if d.Notifications == nil {
+-				d.Notifications = &model.ApplicationDeploymentNotifications{}
+-			}
+-			if d.Notifications.State >= ds.State {
+-				continue
+-			}
+-			needSave := false
+-			if slack := integrations.Slack; slack != nil && slack.Deployments && notificationSettings.Slack != nil && notificationSettings.Slack.Enabled && d.Notifications.Slack.State < ds.State {
+-				client := notifications.NewSlack(slack.Token, cmp.Or(notificationSettings.Slack.Channel, slack.DefaultChannel))
+-				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+-				err := client.SendDeployment(ctx, project, ds)
+-				cancel()
+-				if err != nil {
+-					klog.Errorln(err)
+-				} else {
+-					d.Notifications.Slack.State = ds.State
+-					needSave = true
+-				}
+-			}
+-			if teams := integrations.Teams; teams != nil && teams.Deployments && notificationSettings.Teams != nil && notificationSettings.Teams.Enabled && d.Notifications.Teams.State < ds.State {
+-				client := notifications.NewTeams(teams.WebhookUrl)
+-				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+-				err := client.SendDeployment(ctx, project, ds)
+-				cancel()
+-				if err != nil {
+-					klog.Errorln(err)
+-				} else {
+-					d.Notifications.Teams.State = ds.State
+-					needSave = true
+-				}
+-			}
+-			if webhook := integrations.Webhook; webhook != nil && webhook.Deployments && notificationSettings.Webhook != nil && notificationSettings.Webhook.Enabled && d.Notifications.Webhook.State < ds.State {
+-				client := notifications.NewWebhook(webhook)
+-				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+-				err := client.SendDeployment(ctx, project, ds)
+-				cancel()
+-				if err != nil {
+-					klog.Errorln(err)
+-				} else {
+-					d.Notifications.Webhook.State = ds.State
+-					needSave = true
+-				}
+-			}
+-			if !needSave {
+-				continue
+-			}
+-			if err := w.db.SaveApplicationDeploymentNotifications(project.Id, d); err != nil {
+-				klog.Errorln(err)
+-			}
+-		}
+-	}
+-}
+-
+-func calcDeployments(app *model.Application) []*model.ApplicationDeployment {
+-	if app.Id.Kind != model.ApplicationKindDeployment || len(app.Instances) == 0 {
+-		return nil
+-	}
+-
+-	lifeSpans := map[string]*timeseries.Aggregate{}
+-	images := map[string]*utils.StringSet{}
+-	for _, instance := range app.Instances {
+-		if instance.Pod == nil || instance.Pod.ReplicaSet == "" {
+-			continue
+-		}
+-		rs := instance.Pod.ReplicaSet
+-		ts := lifeSpans[rs]
+-		if ts == nil {
+-			ts = timeseries.NewAggregate(timeseries.NanSum)
+-			lifeSpans[rs] = ts
+-		}
+-		ts.Add(instance.Pod.LifeSpan)
+-		if images[rs] == nil {
+-			images[rs] = utils.NewStringSet()
+-		}
+-		for _, container := range instance.Containers {
+-			images[rs].Add(container.Image)
+-		}
+-	}
+-	if len(lifeSpans) == 0 {
+-		return nil
+-	}
+-
+-	iters := map[string]*timeseries.Iterator{}
+-	for name, agg := range lifeSpans {
+-		iter := agg.Get().Iter()
+-		iters[name] = iter
+-	}
+-	var rssOverTime []replicaSets
+-	done := false
+-	for {
+-		names := make([]string, 0, len(lifeSpans))
+-		var t timeseries.Time
+-		var v float32
+-		for name, iter := range iters {
+-			if !iter.Next() {
+-				done = true
+-				break
+-			}
+-			t, v = iter.Value()
+-			if v > 0 {
+-				names = append(names, name)
+-			}
+-		}
+-		if done {
+-			break
+-		}
+-		if len(names) == 0 {
+-			continue
+-		}
+-		sort.Strings(names)
+-		rssOverTime = append(rssOverTime, replicaSets{time: t, names: names})
+-	}
+-
+-	var deployments []*model.ApplicationDeployment
+ 	var deployment *model.ApplicationDeployment
+ 	prev := ""
+ 	for _, rss := range rssOverTime {

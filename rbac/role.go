@@ -8,7 +8,6 @@ const (
 	RoleAdmin  RoleName = "Admin"
 	RoleEditor RoleName = "Editor"
 	RoleViewer RoleName = "Viewer"
-)
 
 var (
 	Roles = []Role{
@@ -26,15 +25,9 @@ var (
 			NewPermission(ScopeProjectAlertingRules, ActionEdit, nil),
 			NewPermission(ScopeProjectAlerts, ActionEdit, nil),
 		),
-		NewRole(RoleViewer,
 			NewPermission(ScopeAll, ActionView, nil),
 		),
 	}
-)
-
-type RoleName string
-
-func (r RoleName) Valid(roles []Role) bool {
 	return slices.ContainsFunc(roles, func(role Role) bool { return role.Name == r })
 }
 

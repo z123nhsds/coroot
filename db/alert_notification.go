@@ -30,8 +30,6 @@ type AlertNotificationDetails struct {
 	Details     []model.AlertDetail `json:"details,omitempty"`
 	Duration    string              `json:"duration,omitempty"`
 	ResolvedBy  string              `json:"resolved_by,omitempty"`
-}
-
 func (n *AlertNotification) Migrate(m *Migrator) error {
 	return m.Exec(`
 	CREATE TABLE IF NOT EXISTS alert_notification (

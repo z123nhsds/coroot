@@ -3,7 +3,6 @@ package watchers
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"sort"
 	"time"
 
@@ -19,10 +18,7 @@ import (
 
 const (
 	sendTimeout = 30 * time.Second
-)
-
-type Deployments struct {
-	db      *db.DB
+	sendTimeout = 30 * time.Second
 	pricing *cloud_pricing.Manager
 }
 
@@ -38,7 +34,6 @@ func (w *Deployments) Check(project *db.Project, world *model.World) {
 	klog.Infof("%s: checked %d apps in %s", project.Id, apps, time.Since(start).Truncate(time.Millisecond))
 }
 
-func (w *Deployments) discoverAndSaveDeployments(project *db.Project, world *model.World) int {
 	var apps int
 	for _, app := range world.Applications {
 		if app.Id.Kind != model.ApplicationKindDeployment {
@@ -100,134 +95,6 @@ func (w *Deployments) sendNotifications(project *db.Project, world *model.World)
 	now := world.Ctx.To
 	categories := project.GetApplicationCategories()
 	for _, app := range world.Applications {
-		categorySettings := categories[app.Category]
-		if categorySettings == nil {
-			continue
-		}
-		notificationSettings := categorySettings.NotificationSettings.Deployments
-		if !notificationSettings.Enabled {
-			continue
-		}
-
-		for _, ds := range model.CalcApplicationDeploymentStatuses(app, world.CheckConfigs, now) {
-			d := ds.Deployment
-			if now.Sub(d.StartedAt) > timeseries.Day {
-				continue
-			}
-			if d.Notifications == nil {
-				d.Notifications = &model.ApplicationDeploymentNotifications{}
-			}
-			if d.Notifications.State >= ds.State {
-				continue
-			}
-			needSave := false
-			if slack := integrations.Slack; slack != nil && slack.Deployments && notificationSettings.Slack != nil && notificationSettings.Slack.Enabled && d.Notifications.Slack.State < ds.State {
-				client := notifications.NewSlack(slack.Token, cmp.Or(notificationSettings.Slack.Channel, slack.DefaultChannel))
-				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-				err := client.SendDeployment(ctx, project, ds)
-				cancel()
-				if err != nil {
-					klog.Errorln(err)
-				} else {
-					d.Notifications.Slack.State = ds.State
-					needSave = true
-				}
-			}
-			if teams := integrations.Teams; teams != nil && teams.Deployments && notificationSettings.Teams != nil && notificationSettings.Teams.Enabled && d.Notifications.Teams.State < ds.State {
-				client := notifications.NewTeams(teams.WebhookUrl)
-				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-				err := client.SendDeployment(ctx, project, ds)
-				cancel()
-				if err != nil {
-					klog.Errorln(err)
-				} else {
-					d.Notifications.Teams.State = ds.State
-					needSave = true
-				}
-			}
-			if webhook := integrations.Webhook; webhook != nil && webhook.Deployments && notificationSettings.Webhook != nil && notificationSettings.Webhook.Enabled && d.Notifications.Webhook.State < ds.State {
-				client := notifications.NewWebhook(webhook)
-				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-				err := client.SendDeployment(ctx, project, ds)
-				cancel()
-				if err != nil {
-					klog.Errorln(err)
-				} else {
-					d.Notifications.Webhook.State = ds.State
-					needSave = true
-				}
-			}
-			if !needSave {
-				continue
-			}
-			if err := w.db.SaveApplicationDeploymentNotifications(project.Id, d); err != nil {
-				klog.Errorln(err)
-			}
-		}
-	}
-}
-
-func calcDeployments(app *model.Application) []*model.ApplicationDeployment {
-	if app.Id.Kind != model.ApplicationKindDeployment || len(app.Instances) == 0 {
-		return nil
-	}
-
-	lifeSpans := map[string]*timeseries.Aggregate{}
-	images := map[string]*utils.StringSet{}
-	for _, instance := range app.Instances {
-		if instance.Pod == nil || instance.Pod.ReplicaSet == "" {
-			continue
-		}
-		rs := instance.Pod.ReplicaSet
-		ts := lifeSpans[rs]
-		if ts == nil {
-			ts = timeseries.NewAggregate(timeseries.NanSum)
-			lifeSpans[rs] = ts
-		}
-		ts.Add(instance.Pod.LifeSpan)
-		if images[rs] == nil {
-			images[rs] = utils.NewStringSet()
-		}
-		for _, container := range instance.Containers {
-			images[rs].Add(container.Image)
-		}
-	}
-	if len(lifeSpans) == 0 {
-		return nil
-	}
-
-	iters := map[string]*timeseries.Iterator{}
-	for name, agg := range lifeSpans {
-		iter := agg.Get().Iter()
-		iters[name] = iter
-	}
-	var rssOverTime []replicaSets
-	done := false
-	for {
-		names := make([]string, 0, len(lifeSpans))
-		var t timeseries.Time
-		var v float32
-		for name, iter := range iters {
-			if !iter.Next() {
-				done = true
-				break
-			}
-			t, v = iter.Value()
-			if v > 0 {
-				names = append(names, name)
-			}
-		}
-		if done {
-			break
-		}
-		if len(names) == 0 {
-			continue
-		}
-		sort.Strings(names)
-		rssOverTime = append(rssOverTime, replicaSets{time: t, names: names})
-	}
-
-	var deployments []*model.ApplicationDeployment
 	var deployment *model.ApplicationDeployment
 	prev := ""
 	for _, rss := range rssOverTime {
